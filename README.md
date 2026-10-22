@@ -148,6 +148,90 @@ export OPENAI_BASE_URL=http://127.0.0.1:18645/v1
 export OPENAI_API_KEY=anything
 ```
 
+## Use Grok as a "local model" (LM Studio / Ollama emulation)
+
+Some tools only let you plug in a *local* model server. JetBrains AI Assistant
+offers "LM Studio" and "Ollama" as its local providers, and Junie CLI has a
+one-click "LM Studio" / "Ollama" entry under custom models. progrok can stand
+in for either server, backed by your SuperGrok OAuth session:
+
+```bash
+progrok proxy --lmstudio            # LM Studio API on http://127.0.0.1:1234
+progrok proxy --ollama              # Ollama API on http://127.0.0.1:11434
+progrok proxy --lmstudio --ollama   # both, plus the usual :18645
+progrok proxy --lmstudio 4321 --no-openai   # custom port, LM Studio listener only
+```
+
+Each extra listener still forwards every `/v1/*` path like the normal proxy,
+and additionally answers the server's native API:
+
+| Emulated server | Native endpoints served | Notes |
+| --- | --- | --- |
+| LM Studio (`--lmstudio`, port 1234) | `GET /v1/models`, `GET /api/v0/models`, `GET /api/v0/models/{model}`, `GET /api/v1/models`, `POST /api/v0/chat/completions`, `POST /api/v0/completions`, `POST /v1/completions`, `POST /api/v0/embeddings` | Chat is OpenAI SSE, same as LM Studio. LM Studio-only knobs (`max_tokens: -1`, `ttl`, `top_k`, `min_p`, `repeat_penalty`, `draft_model`) are dropped before forwarding. Legacy text completions (IDE inline completion) are served through Chat Completions, with `suffix` turned into a fill-in-the-middle prompt. |
+| Ollama (`--ollama`, port 11434) | `GET /`, `GET /api/version`, `GET /api/tags`, `GET /api/ps`, `GET /v1/models`, `POST /api/show`, `POST /api/chat`, `POST /api/generate` | Streams newline-delimited JSON like Ollama. Tool calls arrive whole with object `arguments`; `images` become image parts; `options` map to `temperature`/`top_p`/`seed`/`stop`/`max_tokens`; `format` maps to `response_format`; `thinking` is returned when the request sets `think`. |
+
+Both listeners also serve the agent-facing surfaces coding agents use, with
+tool calling and reasoning:
+
+| Route | What works |
+| --- | --- |
+| `POST /v1/chat/completions` (+ LM Studio `/api/v0/chat/completions`) | Multi-turn tool calling: `tools`, `tool_choice`, `parallel_tool_calls`, parallel tool-call deltas, `finish_reason: "tool_calls"`, assistant `tool_calls` + `role:"tool"` history, `response_format` (JSON schema). Reasoning streams as `reasoning_content` **and** `reasoning`; assistant `reasoning_content` / `reasoning` / leading `<think>` sent back in history is forwarded to xAI as `reasoning_content`. Only fields xAI accepts are forwarded; `stop` / penalties are dropped for reasoning models. |
+| `POST /v1/responses` | Relayed verbatim (reasoning items, `function_call` items, `previous_response_id`). With `store:false`, `include: ["reasoning.encrypted_content"]` is added so reasoning survives across stateless turns. |
+| `POST /v1/messages`, `POST /v1/messages/count_tokens` | Anthropic Messages API translated to Chat: `tool_use` / `tool_result`, `thinking` blocks (stream + non-stream), `thinking.budget_tokens` / `output_config.effort` → effort. |
+| `POST /api/v1/chat` (LM Studio) | LM Studio REST v1 chat: stateful via `response_id` / `previous_response_id`, `reasoning` off/low/medium/high/on, `reasoning.*` / `message.*` stream events. MCP `integrations` are rejected. |
+| `POST /api/chat` (Ollama) | `tools` + `tool_calls` (object arguments), tool results by `tool_name` or `tool_call_id`, `think: true/false/"low"/"medium"/"high"`, `thinking` in history. |
+
+Reasoning controls in any dialect (`reasoning_effort`, `reasoning: {effort}` or
+`"off".."high"`, `think`, `thinking: {budget_tokens}`,
+`chat_template_kwargs.enable_thinking`) become xAI `reasoning_effort` on models
+that take it (grok-4.5/4.6/4.7, multi-agent; extend with
+`PROGROK_REASONING_EFFORT_MODELS=<regex>`) and are dropped elsewhere. Grok
+cannot switch reasoning off, so "off" means `low` and the reasoning is hidden.
+Choose how reasoning is returned on Chat Completions with
+`--reasoning-format both|reasoning_content|reasoning|think-tags|none` (or
+`PROGROK_REASONING_FORMAT`). `PROGROK_STRIP_REASONING_HISTORY=1` stops sending
+past reasoning back to xAI.
+
+Model lists contain only chat models from your live catalog (Imagine and voice
+models are hidden; a pinned list is used if the catalog cannot be read). Add
+unlisted models with `PROGROK_LOCAL_EXTRA_MODELS=grok-composer-2.5-fast`.
+Model names such as `grok-4.6:latest` or `xai/grok-4.6` are accepted. No API key
+is required on these listeners; they bind to `127.0.0.1` by default.
+
+### Junie CLI
+
+1. `progrok proxy --lmstudio`
+2. In Junie run `/account` → **Custom models and endpoints** → **LM Studio**,
+   keep the base URL `http://localhost:1234` (host and port only).
+3. `/model` and pick e.g. `grok-build-0.1` or `grok-4.6`.
+
+Junie discovers models from `GET /v1/models` and chats on
+`POST /v1/chat/completions` with tool calls. The Ollama entry works the same
+way with `--ollama` and `http://localhost:11434`. A manual profile in
+`~/.junie/models/grok.json` also works:
+
+```json
+{ "baseUrl": "http://localhost:1234/v1/chat/completions", "id": "grok-build-0.1", "apiType": "OpenAICompletion" }
+```
+
+`"apiType": "OpenAIResponses"` with `http://localhost:1234/v1/responses` keeps
+encrypted reasoning across turns; `"apiType": "Anthropic"` with
+`http://localhost:1234/v1/messages` uses the Messages translation.
+
+### JetBrains AI Assistant
+
+1. `progrok proxy --lmstudio` (or `--ollama`).
+2. **Settings | Tools | AI Assistant | Providers & API keys** → Third-party AI
+   providers → Provider **LM Studio**, URL `http://localhost:1234` (or
+   **Ollama**, `http://localhost:11434`) → **Test Connection**.
+3. Under **Models Assignment**, pick Grok models for chat, completion and other
+   features. Raise the context window if you want more than the 64K default.
+
+JetBrains documents that AI Assistant does not call MCP tools and its agents do
+not use local models, so with these providers Grok is used for AI Chat and
+AI Assistant features. For agent use with tools, use Junie CLI or the
+OpenAI-compatible provider at `http://127.0.0.1:18645/v1`.
+
 ## Commands
 
 | Command | Use it for |
@@ -158,6 +242,9 @@ export OPENAI_API_KEY=anything
 | `progrok logout` | Remove stored local credentials. |
 | `progrok status` | Check whether a local OAuth session exists. |
 | `progrok proxy` | Start the local OpenAI-compatible proxy on `127.0.0.1:18645`. |
+| `progrok proxy --lmstudio [port]` | Also impersonate an LM Studio server (default `:1234`) for JetBrains AI Assistant / Junie. |
+| `progrok proxy --ollama [port]` | Also impersonate an Ollama server (default `:11434`). |
+| `progrok proxy --lmstudio --reasoning-format think-tags` | Inline reasoning as `<think>…</think>` for clients that ignore `reasoning_content`. |
 | `progrok chat` | Open the local workspace on `127.0.0.1:18646`: chat, live voice, and media. |
 | `progrok models --detail` | List model aliases, pricing, context windows, and media models. |
 | `progrok search <query>` | Search web and X sources through Grok Responses tools. |
@@ -465,6 +552,11 @@ Also check that the client sends a non-empty API key placeholder.
 
 Stop the existing process or start the proxy on another port if your version
 supports a port flag. Then update `OPENAI_BASE_URL` accordingly.
+
+### Port 1234 or 11434 is already in use
+
+A real LM Studio or Ollama is probably running. Stop it, or pick another port
+(`progrok proxy --lmstudio 1235`) and enter that URL in the IDE.
 
 ### A model returns 404 or 400
 

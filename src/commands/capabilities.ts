@@ -6,6 +6,11 @@ import {
   PROXY_DEFAULT_PORT,
   XAI_API_BASE_URL,
 } from "../auth/constants.js";
+import {
+  LMSTUDIO_DEFAULT_PORT,
+  LOCAL_COMPAT_ENDPOINTS,
+  OLLAMA_DEFAULT_PORT,
+} from "../proxy/server.js";
 import { ModelsClient } from "../surfaces/index.js";
 import type { ModelFamily, XaiModel } from "../surfaces/models.js";
 import { SURFACE_REGISTRY } from "../surfaces/registry.js";
@@ -121,6 +126,22 @@ export async function buildCapabilities(options: {
       port: PROXY_DEFAULT_PORT,
       baseUrl: `http://${PROXY_DEFAULT_HOST}:${PROXY_DEFAULT_PORT}/v1`,
       forwarding: "all HTTP /v1/* paths — no whitelist",
+      localServers: [
+        {
+          name: "lmstudio",
+          flag: "--lmstudio [port]",
+          port: LMSTUDIO_DEFAULT_PORT,
+          baseUrl: `http://${PROXY_DEFAULT_HOST}:${LMSTUDIO_DEFAULT_PORT}`,
+          endpoints: [...LOCAL_COMPAT_ENDPOINTS.lmstudio, "* /v1/*"],
+        },
+        {
+          name: "ollama",
+          flag: "--ollama [port]",
+          port: OLLAMA_DEFAULT_PORT,
+          baseUrl: `http://${PROXY_DEFAULT_HOST}:${OLLAMA_DEFAULT_PORT}`,
+          endpoints: [...LOCAL_COMPAT_ENDPOINTS.ollama, "* /v1/*"],
+        },
+      ],
     },
     webApp: {
       host: PROXY_DEFAULT_HOST,
@@ -187,6 +208,7 @@ export async function buildCapabilities(options: {
     guidance: {
       auth: "Run `progrok login` once.",
       proxy: "`progrok proxy` forwards all HTTP /v1/* paths.",
+      localServers: "`progrok proxy --lmstudio` / `--ollama` impersonate LM Studio (:1234) / Ollama (:11434) for IDEs that only offer local providers.",
       models: "Use `progrok models --json` for the live model catalog.",
     },
     limitations: [
@@ -206,6 +228,9 @@ function printText(cap: Capabilities): void {
   console.log(`version: ${cap.version}`);
   console.log(`upstream: ${cap.upstream}`);
   console.log(`proxy: ${cap.proxy.baseUrl}`);
+  for (const server of cap.proxy.localServers) {
+    console.log(`  ${server.flag}: ${server.baseUrl}`);
+  }
   console.log(`web app: ${cap.webApp.url}`);
   console.log(`model catalog: ${cap.modelCatalog.status}`);
   for (const family of MODEL_FAMILIES) {

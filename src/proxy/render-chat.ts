@@ -7,6 +7,16 @@ export interface ChatRenderContext {
   model: string;
   id?: string;
   created?: number;
+  /**
+   * Delta fields that carry reasoning. Defaults to xAI's own
+   * `reasoning_content`; local-server emulation may add `reasoning`
+   * (LM Studio / Ollama / o-series style) or use none.
+   */
+  reasoningFields?: ReadonlyArray<"reasoning_content" | "reasoning">;
+  /** Inline reasoning into `content` as `<think>…</think>` instead. */
+  thinkTags?: boolean;
+  /** Send `role: "assistant"` on the first delta, as OpenAI does. */
+  assistantRole?: boolean;
 }
 
 async function writeChunk(res: Response, chunk: string): Promise<void> {
@@ -27,6 +37,19 @@ export async function renderChatEvents(
   const created = context.created ?? Math.floor(Date.now() / 1000);
   const toolIndexes = new Map<string, number>();
   let nextToolIndex = 0;
+  const reasoningFields = context.reasoningFields ?? ["reasoning_content"];
+  let roleSent = !context.assistantRole;
+  let thinkOpen = false;
+  const role = (): Record<string, string> => {
+    if (roleSent) return {};
+    roleSent = true;
+    return { role: "assistant" };
+  };
+  const closeThink = (): string => {
+    if (!thinkOpen) return "";
+    thinkOpen = false;
+    return "</think>\n\n";
+  };
 
   const render = async (event: AdapterEvent): Promise<boolean> => {
     const base = {
@@ -45,30 +68,46 @@ export async function renderChatEvents(
           ...base,
           choices: [{
             index: 0,
-            delta: { content: event.text },
+            delta: { ...role(), content: closeThink() + event.text },
             finish_reason: null,
           }],
         }));
         return false;
-      case "reasoning_delta":
+      case "reasoning_delta": {
+        if (context.thinkTags) {
+          const open = thinkOpen ? "" : "<think>";
+          thinkOpen = true;
+          await writeChunk(res, encodedData({
+            ...base,
+            choices: [{
+              index: 0,
+              delta: { ...role(), content: open + event.text },
+              finish_reason: null,
+            }],
+          }));
+          return false;
+        }
+        if (reasoningFields.length === 0) return false;
+        const delta: Record<string, string> = { ...role() };
+        for (const field of reasoningFields) delta[field] = event.text;
         await writeChunk(res, encodedData({
           ...base,
-          choices: [{
-            index: 0,
-            delta: { reasoning_content: event.text },
-            finish_reason: null,
-          }],
+          choices: [{ index: 0, delta, finish_reason: null }],
         }));
         return false;
+      }
       case "tool_call_start": {
         const index = nextToolIndex;
         nextToolIndex += 1;
         toolIndexes.set(event.id, index);
+        const closing = closeThink();
         await writeChunk(res, encodedData({
           ...base,
           choices: [{
             index: 0,
             delta: {
+              ...role(),
+              ...(closing ? { content: closing } : {}),
               tool_calls: [{
                 index,
                 id: event.id,
@@ -98,18 +137,20 @@ export async function renderChatEvents(
         return false;
       case "tool_call_end":
         return false;
-      case "done":
+      case "done": {
+        const closing = closeThink();
         await writeChunk(res, encodedData({
           ...base,
           choices: [{
             index: 0,
-            delta: {},
+            delta: { ...role(), ...(closing ? { content: closing } : {}) },
             finish_reason: event.finishReason ?? "stop",
           }],
           ...(event.usage ? { usage: event.usage.raw ?? event.usage } : {}),
         }));
         await writeChunk(res, "data: [DONE]\n\n");
         return true;
+      }
       case "incomplete":
         await writeChunk(res, encodedData({
           error: {

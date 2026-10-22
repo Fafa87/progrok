@@ -3,7 +3,7 @@ import { isTerminalEvent } from "../core/events.js";
 import { reduceChatStream } from "../wire/chat-stream.js";
 import { reduceResponsesStream } from "../wire/responses-stream.js";
 import { copyUpstreamHeaders } from "./relay.js";
-import { renderChatEvents } from "./render-chat.js";
+import { renderChatEvents, type ChatRenderContext } from "./render-chat.js";
 import { renderResponsesEvents } from "./render-responses.js";
 
 export type NativeProtocol = "chat" | "responses";
@@ -13,6 +13,7 @@ export async function serveNativeStream(input: {
   upstream: Response;
   downstream: ExpressResponse;
   model: string;
+  chatRender?: Omit<ChatRenderContext, "model">;
 }): Promise<"handled" | "relay"> {
   const contentType =
     input.upstream.headers.get("content-type")?.toLowerCase() ?? "";
@@ -48,6 +49,7 @@ export async function serveNativeStream(input: {
 
   if (input.protocol === "chat") {
     await renderChatEvents(first.value, iterator, input.downstream, {
+      ...input.chatRender,
       model: input.model,
     });
   } else {
