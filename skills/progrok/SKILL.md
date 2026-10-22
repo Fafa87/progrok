@@ -84,6 +84,9 @@ encrypted reasoning for `store:false`), Anthropic `/v1/messages`, LM Studio
 `/api/v1/chat` (stateful), Ollama `/api/chat` with `tools` and `think`.
 Add `--verbose` (or `PROGROK_LOG=1`) to see each request and the call to
 `api.x.ai` on stderr; `--log-bodies` also dumps redacted bodies.
+The proxy also prints a subscription usage line on stderr ~10s after the first
+request and then every 5m while there is traffic (`--usage-every 30m`,
+`--no-usage`, `PROGROK_USAGE_EVERY=off`).
 
 ### Pattern 2: Responses API with tools
 

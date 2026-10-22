@@ -4,6 +4,15 @@
 
 ### Added
 
+- `progrok proxy` prints a one-line subscription usage report on stderr
+  (used / limit, percent, remaining, billing period, requests since the last
+  line): ~10s after the first proxied request, then every 5 minutes while
+  requests reach xAI, silent when idle. `--usage-every <duration>` /
+  `PROGROK_USAGE_EVERY` change the interval; `--no-usage` or `off` disable it.
+  Billing failures print one warning and back off without affecting proxying.
+  The billing fetch/parse moved to `src/transport/billing.ts`, shared with
+  `progrok billing` (output unchanged).
+
 - `progrok proxy --verbose` (`-v`, `PROGROK_LOG=1`) logs every exchange on
   stderr with timestamps: the client request (listener, model, stream,
   messages, tools, effort), the call to `api.x.ai`, xAI's status, latency,

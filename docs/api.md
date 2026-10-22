@@ -82,6 +82,29 @@ characters (default 4000). Headers are never logged; `authorization`,
 `api_key`, OAuth tokens and secrets become `[redacted]`, `encrypted_content`
 becomes `[encrypted N chars]`, and inline `data:` images are summarised.
 
+## Usage report (on by default)
+
+While `progrok proxy` runs it prints the subscription usage to stderr, using the
+same billing call as `progrok billing`
+(`https://cli-chat-proxy.grok.com/v1/billing`, amounts in cents shown as
+dollars) and the proxy's own refreshed OAuth token:
+
+```text
+2026-10-22 16:46:26 usage: $12.34 / $50.00 used (24.7%), $37.66 left, period 2026-10-01..2026-10-31, 2 xAI requests since last report
+```
+
+- The first line comes about 10 seconds after the first request that reaches
+  xAI, so you can see it works; after that one line per interval (default
+  `5m`), and only if at least one request reached xAI since the previous line.
+  An idle proxy prints nothing. Model-list lookups are not counted.
+- `--usage-every <duration>` (`30s`, `5m`, `1h`, `1h30m`, bare number =
+  seconds; 10s..24h) or `PROGROK_USAGE_EVERY`; `--no-usage`,
+  `--usage-every 0` or `PROGROK_USAGE_EVERY=off` disable it. The flag wins over
+  the env var. Independent of `--verbose`.
+- A billing failure never affects proxying: one `usage: WARNING …` line per
+  failure streak, then retries back off (interval × 2ⁿ, at most hourly) and the
+  next successful line counts every request since the last report.
+
 ## Local-server emulation (LM Studio / Ollama)
 
 `progrok proxy --lmstudio [port]` and `progrok proxy --ollama [port]` add

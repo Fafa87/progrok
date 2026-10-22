@@ -246,6 +246,7 @@ OpenAI-compatible provider at `http://127.0.0.1:18645/v1`.
 | `progrok proxy --ollama [port]` | Also impersonate an Ollama server (default `:11434`). |
 | `progrok proxy --verbose` (`-v`) | Log every request on stderr: what the client sent, the call to `api.x.ai`, xAI's status/latency/usage/finish reason, and what the client got. Same as `PROGROK_LOG=1`. |
 | `progrok proxy --log-bodies` | Same plus redacted request/response bodies (`PROGROK_LOG=bodies`, cap with `PROGROK_LOG_MAX_BODY`). |
+| `progrok proxy --usage-every 30m` / `--no-usage` | Subscription usage line on stderr (on by default): ~10s after the first request, then every 5m while requests reach xAI; silent when idle. `PROGROK_USAGE_EVERY=30m` / `off`. |
 | `progrok proxy --lmstudio --reasoning-format think-tags` | Inline reasoning as `<think>…</think>` for clients that ignore `reasoning_content`. |
 | `progrok chat` | Open the local workspace on `127.0.0.1:18646`: chat, live voice, and media. |
 | `progrok models --detail` | List model aliases, pricing, context windows, and media models. |

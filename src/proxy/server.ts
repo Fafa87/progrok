@@ -5,6 +5,7 @@ import {
   PROXY_DEFAULT_HOST,
 } from "../auth/constants.js";
 import { getValidBearerSnapshot } from "../auth/token-manager.js";
+import { fetchBilling } from "../transport/billing.js";
 import { executeXaiFetch } from "../transport/fetch.js";
 import { log } from "../utils/logger.js";
 import { PayloadTooLargeError, readBoundedBody } from "./body.js";
@@ -29,6 +30,12 @@ import {
 } from "./local-request.js";
 import { createOllamaRouter } from "./ollama.js";
 import { safeErrorMessage } from "./redact.js";
+import {
+  FIRST_REPORT_DELAY_MS,
+  formatInterval,
+  resolveUsageInterval,
+  UsageReporter,
+} from "./usage-report.js";
 import { filterRequestHeaders, relayUpstreamResponse } from "./relay.js";
 import { decideProxyRoute } from "./route-policy.js";
 
@@ -88,6 +95,31 @@ export interface ProxyAppOptions {
    * to `PROGROK_LOG`.
    */
   trafficLog?: TrafficLogger | TrafficLogOptions;
+  /**
+   * Called once per request sent to xAI (model-list lookups excluded); the
+   * proxy's usage report counts these.
+   */
+  onUpstreamRequest?: (pathWithQuery: string) => void;
+}
+
+/** Catalog lookups do not use the subscription; the usage report skips them. */
+const NON_BILLABLE_PATH = /^\/v1\/(models|language-models|image-generation-models|video-generation-models)(\/|\?|$)/;
+
+function countingFetch(
+  fetchUpstream: ProxyAppDependencies["fetchUpstream"],
+  onUpstreamRequest: ((pathWithQuery: string) => void) | undefined,
+): ProxyAppDependencies["fetchUpstream"] {
+  if (!onUpstreamRequest) return fetchUpstream;
+  return (input, deps) => {
+    if (!NON_BILLABLE_PATH.test(input.pathWithQuery)) {
+      try {
+        onUpstreamRequest(input.pathWithQuery);
+      } catch {
+        // reporting must never break proxying
+      }
+    }
+    return fetchUpstream(input, deps);
+  };
 }
 
 type ProxyRoute = LocalProxyRoute;
@@ -128,7 +160,10 @@ export function createProxyApp(
     : new TrafficLogger(options.trafficLog ?? { level: trafficLogLevelFromEnv(process.env["PROGROK_LOG"]) });
   const resolvedDeps: ProxyAppDependencies = {
     getBearer: deps?.getBearer ?? DEFAULT_DEPS.getBearer,
-    fetchUpstream: traffic.wrapFetch(deps?.fetchUpstream ?? DEFAULT_DEPS.fetchUpstream),
+    fetchUpstream: traffic.wrapFetch(countingFetch(
+      deps?.fetchUpstream ?? DEFAULT_DEPS.fetchUpstream,
+      options.onUpstreamRequest,
+    )),
   };
   const app = express();
   app.use(traffic.middleware(options.compat ?? "openai"));
@@ -325,8 +360,13 @@ export async function startProxy(
   port = PROXY_DEFAULT_PORT,
   host = PROXY_DEFAULT_HOST,
   extraListeners: ProxyListener[] = [],
-  options: { openai?: boolean; trafficLog?: TrafficLogLevel } = {},
+  options: { openai?: boolean; trafficLog?: TrafficLogLevel; usageEveryMs?: number } = {},
 ): Promise<void> {
+  const usage = new UsageReporter({
+    intervalMs: options.usageEveryMs
+      ?? resolveUsageInterval({}, process.env),
+    fetchUsage: async () => fetchBilling({ bearer: (await getValidBearerSnapshot()).bearer }),
+  });
   const traffic = new TrafficLogger({
     level: options.trafficLog ?? trafficLogLevelFromEnv(process.env["PROGROK_LOG"]),
   });
@@ -343,6 +383,7 @@ export async function startProxy(
         ...(listener.compat ? { compat: listener.compat } : {}),
         ...(listener.reasoningFormat ? { reasoningFormat: listener.reasoningFormat } : {}),
         trafficLog: traffic,
+        ...(usage.enabled ? { onUpstreamRequest: () => usage.noteRequest() } : {}),
       });
       servers.push(await listen(app, listener.port, host));
     }
@@ -371,9 +412,16 @@ export async function startProxy(
   } else {
     log.dim("  Traffic log:  off (use --verbose or PROGROK_LOG=1 to see requests to xAI)");
   }
+  if (usage.enabled) {
+    log.dim(`  Usage report: every ${formatInterval(usage.intervalMs)} while there is traffic (stderr; first one ~${formatInterval(Math.min(FIRST_REPORT_DELAY_MS, usage.intervalMs))} after the first request; --no-usage to disable)`);
+  } else {
+    log.dim("  Usage report: off");
+  }
+  usage.start();
   log.info("\nPress Ctrl+C to stop.\n");
 
   process.on("SIGINT", () => {
+    usage.stop();
     log.info("\nprogrok proxy stopped.");
     for (const server of servers) server.close();
     process.exit(0);

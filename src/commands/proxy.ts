@@ -7,6 +7,7 @@ import {
 } from "../proxy/server.js";
 import { REASONING_FORMATS, type ReasoningFormat } from "../proxy/local-request.js";
 import { resolveTrafficLogLevel } from "../proxy/traffic-log.js";
+import { resolveUsageInterval } from "../proxy/usage-report.js";
 import { loadTokens } from "../auth/token-store.js";
 import {
   PROXY_DEFAULT_PORT,
@@ -24,6 +25,8 @@ interface ProxyOptions {
   reasoningFormat?: string;
   verbose?: boolean;
   logBodies?: boolean;
+  usage?: boolean;
+  usageEvery?: string;
 }
 
 /** `--lmstudio` alone means the default port; `--lmstudio 4321` picks one. */
@@ -86,7 +89,12 @@ export function proxyCommand(): Command {
   Traffic log (stderr, one line per event, ids tie lines together):
     $ progrok proxy --verbose           # client request, call to api.x.ai, xAI status/latency/usage, client response
     $ progrok proxy --log-bodies        # also dump redacted request/response bodies
-    PROGROK_LOG=1 / PROGROK_LOG=bodies do the same; PROGROK_LOG_MAX_BODY caps each dump (default 4000 chars).`,
+    PROGROK_LOG=1 / PROGROK_LOG=bodies do the same; PROGROK_LOG_MAX_BODY caps each dump (default 4000 chars).
+
+  Usage report (on by default, stderr): subscription usage ~10s after the first
+  request, then every 5m but only if requests reached xAI since the last line.
+    $ progrok proxy --usage-every 30m   # or 30s, 1h, 1h30m; PROGROK_USAGE_EVERY
+    $ progrok proxy --no-usage          # or PROGROK_USAGE_EVERY=off`,
     )
     .option("-p, --port <port>", "Port number", String(PROXY_DEFAULT_PORT))
     .option("--host <host>", "Host to bind", PROXY_DEFAULT_HOST)
@@ -105,6 +113,8 @@ export function proxyCommand(): Command {
     )
     .option("-v, --verbose", "Log every request, the call to xAI and its result on stderr (or PROGROK_LOG=1)")
     .option("--log-bodies", "With the traffic log, also dump redacted request/response bodies (or PROGROK_LOG=bodies)")
+    .option("--usage-every <duration>", "Subscription usage report interval while there is traffic: 10s..24h, e.g. 5m, 1h (default 5m, or PROGROK_USAGE_EVERY)")
+    .option("--no-usage", "Do not print the periodic subscription usage report")
     .action(async (opts: ProxyOptions) => {
       const tokens = loadTokens();
       if (!tokens?.accessToken) {
@@ -117,6 +127,7 @@ export function proxyCommand(): Command {
         await startProxy(listeners.port, opts.host, listeners.extra, {
           openai: listeners.openai,
           trafficLog: resolveTrafficLogLevel(opts),
+          usageEveryMs: resolveUsageInterval(opts),
         });
         await new Promise(() => {});
       } catch (err) {
