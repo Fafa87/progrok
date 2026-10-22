@@ -82,6 +82,8 @@ Both listeners also serve agent surfaces with tools + reasoning:
 `--reasoning-format think-tags` for `<think>`), `/v1/responses` (relayed,
 encrypted reasoning for `store:false`), Anthropic `/v1/messages`, LM Studio
 `/api/v1/chat` (stateful), Ollama `/api/chat` with `tools` and `think`.
+Add `--verbose` (or `PROGROK_LOG=1`) to see each request and the call to
+`api.x.ai` on stderr; `--log-bodies` also dumps redacted bodies.
 
 ### Pattern 2: Responses API with tools
 

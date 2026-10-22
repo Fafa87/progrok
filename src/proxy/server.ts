@@ -8,6 +8,12 @@ import { getValidBearerSnapshot } from "../auth/token-manager.js";
 import { executeXaiFetch } from "../transport/fetch.js";
 import { log } from "../utils/logger.js";
 import { PayloadTooLargeError, readBoundedBody } from "./body.js";
+import {
+  TrafficLogger,
+  trafficLogLevelFromEnv,
+  type TrafficLogLevel,
+  type TrafficLogOptions,
+} from "./traffic-log.js";
 import { prepareGrokRequestObject } from "./composer-inject.js";
 import { serveNativeStream } from "./native-stream.js";
 import { createLmStudioRouter, type ForwardToProxy } from "./lmstudio.js";
@@ -76,6 +82,12 @@ export interface ProxyAppOptions {
    * `PROGROK_REASONING_FORMAT`, else `both` (`reasoning_content` + `reasoning`).
    */
   reasoningFormat?: ReasoningFormat;
+  /**
+   * Traffic log (`--verbose` / `--log-bodies`). A logger is shared between
+   * listeners so exchange ids stay unique; options build a new one. Defaults
+   * to `PROGROK_LOG`.
+   */
+  trafficLog?: TrafficLogger | TrafficLogOptions;
 }
 
 type ProxyRoute = LocalProxyRoute;
@@ -111,11 +123,15 @@ export function createProxyApp(
   deps?: Partial<ProxyAppDependencies>,
   options: ProxyAppOptions = {},
 ): express.Express {
+  const traffic = options.trafficLog instanceof TrafficLogger
+    ? options.trafficLog
+    : new TrafficLogger(options.trafficLog ?? { level: trafficLogLevelFromEnv(process.env["PROGROK_LOG"]) });
   const resolvedDeps: ProxyAppDependencies = {
     getBearer: deps?.getBearer ?? DEFAULT_DEPS.getBearer,
-    fetchUpstream: deps?.fetchUpstream ?? DEFAULT_DEPS.fetchUpstream,
+    fetchUpstream: traffic.wrapFetch(deps?.fetchUpstream ?? DEFAULT_DEPS.fetchUpstream),
   };
   const app = express();
+  app.use(traffic.middleware(options.compat ?? "openai"));
 
   app.get("/health", (_req: Request, res: Response) => {
     res.json({ status: "ok", upstream: "xAI Grok", proxy: "progrok" });
@@ -309,8 +325,11 @@ export async function startProxy(
   port = PROXY_DEFAULT_PORT,
   host = PROXY_DEFAULT_HOST,
   extraListeners: ProxyListener[] = [],
-  options: { openai?: boolean } = {},
+  options: { openai?: boolean; trafficLog?: TrafficLogLevel } = {},
 ): Promise<void> {
+  const traffic = new TrafficLogger({
+    level: options.trafficLog ?? trafficLogLevelFromEnv(process.env["PROGROK_LOG"]),
+  });
   const listeners: ProxyListener[] = [
     ...(options.openai === false ? [] : [{ port }]),
     ...extraListeners,
@@ -323,6 +342,7 @@ export async function startProxy(
       const app = createProxyApp(undefined, {
         ...(listener.compat ? { compat: listener.compat } : {}),
         ...(listener.reasoningFormat ? { reasoningFormat: listener.reasoningFormat } : {}),
+        trafficLog: traffic,
       });
       servers.push(await listen(app, listener.port, host));
     }
@@ -346,6 +366,11 @@ export async function startProxy(
   log.dim(
     "  Client auth:  any bearer token or none (proxy injects your OAuth credential)",
   );
+  if (traffic.enabled) {
+    log.dim(`  Traffic log:  ${traffic.bodies ? "events + bodies (redacted)" : "events"} on stderr`);
+  } else {
+    log.dim("  Traffic log:  off (use --verbose or PROGROK_LOG=1 to see requests to xAI)");
+  }
   log.info("\nPress Ctrl+C to stop.\n");
 
   process.on("SIGINT", () => {

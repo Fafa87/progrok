@@ -54,6 +54,34 @@ been committed, failures are surfaced to the caller and are never replayed.
 
 ---
 
+## Traffic log (`--verbose`, `--log-bodies`)
+
+`progrok proxy --verbose` (`-v`, or `PROGROK_LOG=1`) writes one line per event
+to stderr on every listener (OpenAI `:18645`, LM Studio, Ollama). Lines of one
+exchange share an id:
+
+```text
+2026-10-22 16:37:33.394 [#2 lmstudio] → POST /v1/chat/completions model=grok-4.6 stream=yes messages=1 tools=1 effort=high
+2026-10-22 16:37:33.395 [#2 lmstudio] ↗ xAI POST https://api.x.ai/v1/chat/completions model=grok-4.6 stream=yes messages=1 tools=1 effort=high
+2026-10-22 16:37:33.395 [#2 lmstudio] ↙ xAI 200 POST /v1/chat/completions headers=0ms stream opened
+2026-10-22 16:37:33.398 [#2 lmstudio] ↙ xAI 200 POST /v1/chat/completions stream done ttfb=1ms total=3ms events=11 2206B tokens in=11 out=7 reasoning=5 finish=tool_calls tool_calls=2 reasoning_chars=26
+2026-10-22 16:37:33.400 [#2 lmstudio] ⇐ client 200 POST /v1/chat/completions total=7ms
+2026-10-22 16:37:33.446 [#7 openai] ↙ ERROR xAI 404 POST /v1/chat/completions headers=0ms total=1ms 50B error="The model missing-model does not exist"
+```
+
+`→` client request (model, stream, message/input count, tools, effort in any
+dialect), `↗` the request to xAI with its full URL, `↙` xAI's answer (status,
+header latency; for streams time to first byte, total, event count, token
+usage, finish reason, tool-call count), `⇐` the response to the client with
+total duration, `✖` a client that disconnected early. Failures carry `ERROR`.
+
+`--log-bodies` (or `PROGROK_LOG=bodies`) adds the client request body, the
+body sent to xAI, xAI's JSON response or the assembled stream (reasoning, text,
+tool calls) and the raw client response, each capped at `PROGROK_LOG_MAX_BODY`
+characters (default 4000). Headers are never logged; `authorization`,
+`api_key`, OAuth tokens and secrets become `[redacted]`, `encrypted_content`
+becomes `[encrypted N chars]`, and inline `data:` images are summarised.
+
 ## Local-server emulation (LM Studio / Ollama)
 
 `progrok proxy --lmstudio [port]` and `progrok proxy --ollama [port]` add

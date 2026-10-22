@@ -6,6 +6,7 @@ import {
   type ProxyListener,
 } from "../proxy/server.js";
 import { REASONING_FORMATS, type ReasoningFormat } from "../proxy/local-request.js";
+import { resolveTrafficLogLevel } from "../proxy/traffic-log.js";
 import { loadTokens } from "../auth/token-store.js";
 import {
   PROXY_DEFAULT_PORT,
@@ -21,6 +22,8 @@ interface ProxyOptions {
   ollama?: string | boolean;
   openai: boolean;
   reasoningFormat?: string;
+  verbose?: boolean;
+  logBodies?: boolean;
 }
 
 /** `--lmstudio` alone means the default port; `--lmstudio 4321` picks one. */
@@ -78,7 +81,12 @@ export function proxyCommand(): Command {
   providers (JetBrains AI Assistant, Junie CLI, ...):
     $ progrok proxy --lmstudio          # also listen on :${LMSTUDIO_DEFAULT_PORT} as LM Studio
     $ progrok proxy --ollama            # also listen on :${OLLAMA_DEFAULT_PORT} as Ollama
-    $ progrok proxy --lmstudio 4321 --no-openai`,
+    $ progrok proxy --lmstudio 4321 --no-openai
+
+  Traffic log (stderr, one line per event, ids tie lines together):
+    $ progrok proxy --verbose           # client request, call to api.x.ai, xAI status/latency/usage, client response
+    $ progrok proxy --log-bodies        # also dump redacted request/response bodies
+    PROGROK_LOG=1 / PROGROK_LOG=bodies do the same; PROGROK_LOG_MAX_BODY caps each dump (default 4000 chars).`,
     )
     .option("-p, --port <port>", "Port number", String(PROXY_DEFAULT_PORT))
     .option("--host <host>", "Host to bind", PROXY_DEFAULT_HOST)
@@ -95,6 +103,8 @@ export function proxyCommand(): Command {
       "--reasoning-format <format>",
       "How emulated Chat Completions return reasoning: both | reasoning_content | reasoning | think-tags | none (default both, or PROGROK_REASONING_FORMAT)",
     )
+    .option("-v, --verbose", "Log every request, the call to xAI and its result on stderr (or PROGROK_LOG=1)")
+    .option("--log-bodies", "With the traffic log, also dump redacted request/response bodies (or PROGROK_LOG=bodies)")
     .action(async (opts: ProxyOptions) => {
       const tokens = loadTokens();
       if (!tokens?.accessToken) {
@@ -106,6 +116,7 @@ export function proxyCommand(): Command {
         const listeners = resolveProxyListeners(opts);
         await startProxy(listeners.port, opts.host, listeners.extra, {
           openai: listeners.openai,
+          trafficLog: resolveTrafficLogLevel(opts),
         });
         await new Promise(() => {});
       } catch (err) {

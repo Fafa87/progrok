@@ -4,6 +4,14 @@
 
 ### Added
 
+- `progrok proxy --verbose` (`-v`, `PROGROK_LOG=1`) logs every exchange on
+  stderr with timestamps: the client request (listener, model, stream,
+  messages, tools, effort), the call to `api.x.ai`, xAI's status, latency,
+  time to first byte, usage, finish reason and tool calls, and the response to
+  the client; errors are marked. `--log-bodies` (`PROGROK_LOG=bodies`) also
+  dumps redacted, size-capped bodies. The startup banner says whether the
+  traffic log is on.
+
 - `progrok proxy --lmstudio [port]` and `--ollama [port]` start extra
   listeners (default `:1234` / `:11434`) that impersonate LM Studio and Ollama,
   so JetBrains AI Assistant, Junie CLI and other tools that only offer
