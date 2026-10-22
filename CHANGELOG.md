@@ -4,6 +4,49 @@
 
 ### Added
 
+- The proxy usage line and `progrok billing` show the SuperGrok weekly usage
+  pool from `cli-chat-proxy.grok.com/v1/billing?format=credits` (percent used,
+  reset time, per-product share; `usagePool` in `--json`). The usage line and
+  `--verbose` also show xAI rate-limit headers (`x-ratelimit-*`,
+  `retry-after`) seen on real responses. Missing parts are omitted.
+
+- `progrok proxy` prints a one-line subscription usage report on stderr
+  (used / limit, percent, remaining, billing period, requests since the last
+  line): ~10s after the first proxied request, then every 5 minutes while
+  requests reach xAI, silent when idle. `--usage-every <duration>` /
+  `PROGROK_USAGE_EVERY` change the interval; `--no-usage` or `off` disable it.
+  Billing failures print one warning and back off without affecting proxying.
+  The billing fetch/parse moved to `src/transport/billing.ts`, shared with
+  `progrok billing` (output unchanged).
+
+- `progrok proxy --verbose` (`-v`, `PROGROK_LOG=1`) logs every exchange on
+  stderr with timestamps: the client request (listener, model, stream,
+  messages, tools, effort), the call to `api.x.ai`, xAI's status, latency,
+  time to first byte, usage, finish reason and tool calls, and the response to
+  the client; errors are marked. `--log-bodies` (`PROGROK_LOG=bodies`) also
+  dumps redacted, size-capped bodies. The startup banner says whether the
+  traffic log is on.
+
+- `progrok proxy --lmstudio [port]` and `--ollama [port]` start extra
+  listeners (default `:1234` / `:11434`) that impersonate LM Studio and Ollama,
+  so JetBrains AI Assistant, Junie CLI and other tools that only offer
+  "local model" providers can use the SuperGrok OAuth session. LM Studio:
+  `/api/v0/models`, `/api/v0/models/{model}`, `/api/v1/models`,
+  `/api/v0/chat/completions`, `/api/v0/completions`, `/api/v0/embeddings`, and
+  a chat-only `/v1/models`. Ollama: `/`, `/api/version`, `/api/tags`,
+  `/api/ps`, `/api/show`, `/api/chat` and `/api/generate` with NDJSON
+  streaming and tool calls. `--no-openai` skips the `:18645` listener.
+  `capabilities --json` lists them under `proxy.localServers`.
+- Agent and reasoning support on the emulated servers: multi-turn tool calling
+  (parallel calls, tool history, `tool_choice`, `response_format`) on
+  `/v1/chat/completions`, `/api/v0/chat/completions` and Ollama `/api/chat`;
+  reasoning returned as `reasoning_content` + `reasoning` (or `<think>` tags via
+  `--reasoning-format` / `PROGROK_REASONING_FORMAT`) and Ollama `thinking`;
+  reasoning history forwarded as `reasoning_content`; every reasoning-control
+  dialect mapped to `reasoning_effort` where the model accepts it. New routes:
+  `/v1/responses` relay (encrypted reasoning for `store:false`), Anthropic
+  `/v1/messages` + `/count_tokens`, and LM Studio's stateful `/api/v1/chat`.
+
 - The local web app is one workspace with Chat, Voice and Media tabs. The top
   bar reports the served endpoint, the catalog model count and the active model,
   and each row stays hidden until a value is observed.

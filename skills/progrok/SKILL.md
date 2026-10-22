@@ -68,6 +68,27 @@ curl http://127.0.0.1:18645/v1/chat/completions \
   -d '{"model": "grok-4.6", "messages": [{"role": "user", "content": "Hello"}]}'
 ```
 
+### Pattern 1b: Tools that only accept a local model server
+
+```bash
+progrok proxy --lmstudio   # LM Studio API on :1234 (JetBrains AI Assistant, Junie CLI)
+progrok proxy --ollama     # Ollama API on :11434 (/api/tags, /api/chat NDJSON, /api/show)
+```
+
+Point the tool's "LM Studio" provider at `http://localhost:1234` or its
+"Ollama" provider at `http://localhost:11434`. No API key is needed.
+Both listeners also serve agent surfaces with tools + reasoning:
+`/v1/chat/completions` (reasoning as `reasoning_content` and `reasoning`;
+`--reasoning-format think-tags` for `<think>`), `/v1/responses` (relayed,
+encrypted reasoning for `store:false`), Anthropic `/v1/messages`, LM Studio
+`/api/v1/chat` (stateful), Ollama `/api/chat` with `tools` and `think`.
+Add `--verbose` (or `PROGROK_LOG=1`) to see each request and the call to
+`api.x.ai` on stderr; `--log-bodies` also dumps redacted bodies.
+The proxy also prints a subscription usage line on stderr ~10s after the first
+request and then every 5m while there is traffic (`--usage-every 30m`,
+`--no-usage`, `PROGROK_USAGE_EVERY=off`). It includes the SuperGrok weekly
+pool (`| weekly: 63% used, resets …`), also shown by `progrok billing`.
+
 ### Pattern 2: Responses API with tools
 
 ```bash

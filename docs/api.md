@@ -54,6 +54,154 @@ been committed, failures are surfaced to the caller and are never replayed.
 
 ---
 
+## Traffic log (`--verbose`, `--log-bodies`)
+
+`progrok proxy --verbose` (`-v`, or `PROGROK_LOG=1`) writes one line per event
+to stderr on every listener (OpenAI `:18645`, LM Studio, Ollama). Lines of one
+exchange share an id:
+
+```text
+2026-10-22 16:37:33.394 [#2 lmstudio] → POST /v1/chat/completions model=grok-4.6 stream=yes messages=1 tools=1 effort=high
+2026-10-22 16:37:33.395 [#2 lmstudio] ↗ xAI POST https://api.x.ai/v1/chat/completions model=grok-4.6 stream=yes messages=1 tools=1 effort=high
+2026-10-22 16:37:33.395 [#2 lmstudio] ↙ xAI 200 POST /v1/chat/completions headers=0ms stream opened
+2026-10-22 16:37:33.398 [#2 lmstudio] ↙ xAI 200 POST /v1/chat/completions stream done ttfb=1ms total=3ms events=11 2206B tokens in=11 out=7 reasoning=5 finish=tool_calls tool_calls=2 reasoning_chars=26
+2026-10-22 16:37:33.400 [#2 lmstudio] ⇐ client 200 POST /v1/chat/completions total=7ms
+2026-10-22 16:37:33.446 [#7 openai] ↙ ERROR xAI 404 POST /v1/chat/completions headers=0ms total=1ms 50B error="The model missing-model does not exist"
+```
+
+`→` client request (model, stream, message/input count, tools, effort in any
+dialect), `↗` the request to xAI with its full URL, `↙` xAI's answer (status,
+header latency; for streams time to first byte, total, event count, token
+usage, finish reason, tool-call count), `⇐` the response to the client with
+total duration, `✖` a client that disconnected early. Failures carry `ERROR`.
+
+`--log-bodies` (or `PROGROK_LOG=bodies`) adds the client request body, the
+body sent to xAI, xAI's JSON response or the assembled stream (reasoning, text,
+tool calls) and the raw client response, each capped at `PROGROK_LOG_MAX_BODY`
+characters (default 4000). Headers are never logged; `authorization`,
+`api_key`, OAuth tokens and secrets become `[redacted]`, `encrypted_content`
+becomes `[encrypted N chars]`, and inline `data:` images are summarised.
+
+## Usage report (on by default)
+
+While `progrok proxy` runs it prints the subscription usage to stderr, using the
+same billing call as `progrok billing`
+(`https://cli-chat-proxy.grok.com/v1/billing`, amounts in cents shown as
+dollars) and the proxy's own refreshed OAuth token:
+
+```text
+2026-10-22 16:55:27 usage: $12.34 / $50.00 used (24.7%), $37.66 left, period 2026-10-01..2026-10-31, 2 xAI requests since last report | weekly: 63% used, resets Tue 2026-10-27 02:00 | rate-limit: requests 1798/1800 left
+```
+
+Parts, each omitted when its source has nothing:
+
+- Monthly allowance — `GET /v1/billing` (`monthlyLimit`, `used` in cents,
+  billing period). Same as `progrok billing`.
+- **Weekly pool** — `GET /v1/billing?format=credits`, the call behind Grok
+  Build's `/usage` panel: `currentPeriod {type: USAGE_PERIOD_TYPE_WEEKLY,
+  start, end}`, `creditUsagePercent` (percent used), `productUsage`,
+  `prepaidBalance`, `onDemandCap/Used`. SuperGrok paid plans have one shared
+  weekly pool across Chat, Imagine, Voice, Build and API
+  ([Grok FAQ](https://docs.x.ai/grok/faq),
+  [Usage limits](https://docs.x.ai/x-subscription/usage-limits)); xAI
+  publishes only a percentage, no absolute size and no 5-hour window. The reset
+  is shown in local time.
+- Rate limits — the latest `x-ratelimit-{limit,remaining,reset}-{requests,tokens}`,
+  `retry-after` or other quota-looking headers on real xAI responses (API
+  per-model budgets; not the weekly pool). Also shown on `↙` lines of
+  `--verbose`.
+
+- The first line comes about 10 seconds after the first request that reaches
+  xAI, so you can see it works; after that one line per interval (default
+  `5m`), and only if at least one request reached xAI since the previous line.
+  An idle proxy prints nothing. Model-list lookups are not counted.
+- `--usage-every <duration>` (`30s`, `5m`, `1h`, `1h30m`, bare number =
+  seconds; 10s..24h) or `PROGROK_USAGE_EVERY`; `--no-usage`,
+  `--usage-every 0` or `PROGROK_USAGE_EVERY=off` disable it. The flag wins over
+  the env var. Independent of `--verbose`.
+- A billing failure never affects proxying: one `usage: WARNING …` line per
+  failure streak, then retries back off (interval × 2ⁿ, at most hourly) and the
+  next successful line counts every request since the last report.
+
+## Local-server emulation (LM Studio / Ollama)
+
+`progrok proxy --lmstudio [port]` and `progrok proxy --ollama [port]` add
+listeners (defaults `1234` and `11434`) that keep the full `/v1/*` proxy and
+also answer the native API of the impersonated server. Inbound auth is not
+required. The plain `:18645` listener does not serve these routes.
+
+### Agent and reasoning surfaces (both listeners)
+
+| Route | Behaviour |
+| --- | --- |
+| `POST /v1/chat/completions` | Re-rendered from xAI Chat. Top-level fields are allow-listed to what xAI accepts (`model, messages, tools, tool_choice, parallel_tool_calls, response_format, reasoning_effort, temperature, top_p, max_completion_tokens, stream, stream_options, seed, n, logprobs, top_logprobs, user, stop, presence_penalty, frequency_penalty, search_parameters, web_search_options, ...`); `stop`/`presence_penalty`/`frequency_penalty` are dropped for reasoning models; `max_tokens` becomes `max_completion_tokens`; non-function tools are dropped and `tool_choice`/`parallel_tool_calls` removed when no tools remain. Messages: `developer`→`system`; assistant `reasoning_content`/`reasoning`/`thinking`/leading `<think>` → `reasoning_content`; `tool_calls[].function.arguments` objects stringified, missing ids/type filled; `content:null` with tool calls. Output: reasoning deltas as `reasoning_content` and `reasoning` (see `--reasoning-format`), tool-call deltas by `index`, `finish_reason:"tool_calls"`. |
+| `POST /v1/responses` | Model name normalised, `reasoning.effort` mapped, local knobs removed, `include: ["reasoning.encrypted_content"]` added when `store:false`; the SSE stream and JSON are relayed unchanged. |
+| `POST /v1/messages` | Anthropic Messages → Chat: `system`, text/image/`tool_use`/`tool_result`/`thinking` blocks, `max_tokens`, `stop_sequences`, `thinking`, `output_config.effort`, `tools[].input_schema`, `tool_choice` (`any`→`required`), `disable_parallel_tool_use`. Returns `thinking` (signature `progrok`), `text`, `tool_use` blocks and `stop_reason` `tool_use`/`max_tokens`/`end_turn`; streams `message_start … content_block_* … message_delta, message_stop`. |
+| `POST /v1/messages/count_tokens` | `{input_tokens}` estimate (characters / 4). |
+
+Effort mapping: `reasoning_effort`, `reasoning` (string or `{effort}`),
+`think`, `thinking` (`{type, budget_tokens}`: <4096 low, <16384 medium, else
+high), `chat_template_kwargs`; `none/off/minimal/false` → `low`, `max` →
+`xhigh`. Sent only to models matching grok-4.5/4.6/4.7 / multi-agent or
+`PROGROK_REASONING_EFFORT_MODELS`.
+
+Environment: `PROGROK_REASONING_FORMAT` (`both` default, `reasoning_content`,
+`reasoning`, `think-tags`, `none`), `PROGROK_STRIP_REASONING_HISTORY=1`,
+`PROGROK_REASONING_EFFORT_MODELS=<regex>`.
+
+### LM Studio listener
+
+| Route | Behaviour |
+| --- | --- |
+| `GET /v1/models` | OpenAI list of chat models only (no Imagine/voice models). |
+| `GET /api/v0/models` | `{object:"list", data:[{id, object:"model", type:"llm"\|"vlm", publisher:"xai", arch, compatibility_type, quantization, state:"loaded", max_context_length}]}` |
+| `GET /api/v0/models/{model}` | One entry in the same shape. |
+| `GET /api/v1/models` | LM Studio 0.4 REST v1 shape: `{models:[{type, publisher, key, display_name, loaded_instances, max_context_length, capabilities:{vision, trained_for_tool_use}}]}` |
+| `POST /api/v0/chat/completions`, `POST /v1/chat/completions` | Forwarded to xAI `/v1/chat/completions` through the native pipeline (SSE re-rendering, tool calls, composer handling). `max_tokens <= 0`, `ttl`, `draft_model`, `top_k`, `min_p`, `repeat_penalty`, `keep_alive` are removed; `xai/` and `:latest` model decorations are stripped. The body is parsed as JSON whatever the declared content type. |
+| `POST /api/v0/completions`, `POST /v1/completions` | Legacy text completion, served through Chat Completions (xAI's legacy endpoint does not serve reasoning models). `suffix` becomes a fill-in-the-middle instruction. Returns `text_completion` JSON or SSE chunks ending in `data: [DONE]`. |
+| `POST /api/v0/embeddings` | Forwarded to `/v1/embeddings`. |
+| `POST /api/v1/chat` | LM Studio REST v1 chat. `input` (string or `message`/`image` items), `system_prompt`, `reasoning` (`off`/`low`/`medium`/`high`/`on`), `temperature`, `top_p`, `max_output_tokens`, `store`, `previous_response_id` (in-memory history incl. reasoning, last 500 responses). Returns `{model_instance_id, output:[{type:"reasoning"},{type:"message"}], stats, response_id}`; `stream:true` emits `chat.start, prompt_processing.*, reasoning.start/delta/end, message.start/delta/end, error, chat.end`. `integrations` (MCP) → 400. |
+
+```bash
+curl http://127.0.0.1:1234/api/v0/models
+curl -N http://127.0.0.1:1234/api/v0/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"grok-4.6","stream":true,"messages":[{"role":"user","content":"Hello"}]}'
+```
+
+### Ollama listener
+
+| Route | Behaviour |
+| --- | --- |
+| `GET /`, `HEAD /` | `Ollama is running` |
+| `GET /api/version` | `{"version":"0.12.6"}` |
+| `GET /api/tags` | `{models:[{name, model, modified_at, size, digest, details:{format, family:"grok", ...}}]}` |
+| `GET /api/ps` | Same entries plus `expires_at`, `size_vram`, `context_length`. |
+| `GET /v1/models` | OpenAI list of chat models only. |
+| `POST /api/show` | `{modelfile, parameters, template, details, model_info:{"general.architecture":"grok","grok.context_length":N}, capabilities:["completion","tools","vision"?,"thinking"?]}` |
+| `POST /api/chat` | Translated to Chat Completions. `stream` defaults to `true` and streams `application/x-ndjson` lines `{model, created_at, message:{role, content, thinking?, tool_calls?}, done:false}` and a final `done:true` line with `done_reason`, `prompt_eval_count`, `eval_count` and durations. `stream:false` returns one object. |
+| `POST /api/generate` | Same, with `response` instead of `message`; `system`, `suffix` (fill-in-the-middle), `images` and `raw` honoured. |
+| `POST /api/pull` / `push` / `create` / `copy`, `DELETE /api/delete` | Acknowledged without effect. |
+
+Request mapping for `/api/chat` and `/api/generate`:
+
+- `messages[].images` (base64) → `image_url` data-URI parts.
+- Assistant `tool_calls[].function.arguments` (object) → JSON string; missing
+  ids are synthesised and matched to later `role:"tool"` messages by
+  `tool_call_id` or `tool_name`.
+- `tools` are passed through unchanged (same JSON shape as OpenAI).
+- `options.temperature`, `top_p`, `seed`, `stop`, `num_predict > 0` →
+  `temperature`, `top_p`, `seed`, `stop`, `max_tokens`.
+- `format: "json"` → `response_format: {type:"json_object"}`; a schema object →
+  `json_schema`.
+- `think: true` (or a level string) returns reasoning as `thinking`; a level
+  sets `reasoning_effort`; `think: false` sends `low` and hides thinking.
+- Assistant `thinking` in history → `reasoning_content`.
+- Upstream refusals become `{"error": "..."}` with the upstream status code.
+
+Tool calls are emitted once complete, with object `arguments`, as Ollama does.
+
+---
+
 ## Chat & Responses
 
 ### POST /v1/chat/completions

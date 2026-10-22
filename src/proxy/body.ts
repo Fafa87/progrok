@@ -1,4 +1,5 @@
 import type { Request } from "express";
+import { noteRequestBody } from "./traffic-log.js";
 
 export const MAX_PROXY_BODY_BYTES = 100 * 1024 * 1024;
 
@@ -28,5 +29,7 @@ export async function readBoundedBody(
     chunks.push(buffer);
   }
 
-  return Buffer.concat(chunks, total);
+  const body = Buffer.concat(chunks, total);
+  noteRequestBody(req, body);
+  return body;
 }
