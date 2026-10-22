@@ -86,7 +86,8 @@ Add `--verbose` (or `PROGROK_LOG=1`) to see each request and the call to
 `api.x.ai` on stderr; `--log-bodies` also dumps redacted bodies.
 The proxy also prints a subscription usage line on stderr ~10s after the first
 request and then every 5m while there is traffic (`--usage-every 30m`,
-`--no-usage`, `PROGROK_USAGE_EVERY=off`).
+`--no-usage`, `PROGROK_USAGE_EVERY=off`). It includes the SuperGrok weekly
+pool (`| weekly: 63% used, resets …`), also shown by `progrok billing`.
 
 ### Pattern 2: Responses API with tools
 

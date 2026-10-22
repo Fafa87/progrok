@@ -90,8 +90,26 @@ same billing call as `progrok billing`
 dollars) and the proxy's own refreshed OAuth token:
 
 ```text
-2026-10-22 16:46:26 usage: $12.34 / $50.00 used (24.7%), $37.66 left, period 2026-10-01..2026-10-31, 2 xAI requests since last report
+2026-10-22 16:55:27 usage: $12.34 / $50.00 used (24.7%), $37.66 left, period 2026-10-01..2026-10-31, 2 xAI requests since last report | weekly: 63% used, resets Tue 2026-10-27 02:00 | rate-limit: requests 1798/1800 left
 ```
+
+Parts, each omitted when its source has nothing:
+
+- Monthly allowance — `GET /v1/billing` (`monthlyLimit`, `used` in cents,
+  billing period). Same as `progrok billing`.
+- **Weekly pool** — `GET /v1/billing?format=credits`, the call behind Grok
+  Build's `/usage` panel: `currentPeriod {type: USAGE_PERIOD_TYPE_WEEKLY,
+  start, end}`, `creditUsagePercent` (percent used), `productUsage`,
+  `prepaidBalance`, `onDemandCap/Used`. SuperGrok paid plans have one shared
+  weekly pool across Chat, Imagine, Voice, Build and API
+  ([Grok FAQ](https://docs.x.ai/grok/faq),
+  [Usage limits](https://docs.x.ai/x-subscription/usage-limits)); xAI
+  publishes only a percentage, no absolute size and no 5-hour window. The reset
+  is shown in local time.
+- Rate limits — the latest `x-ratelimit-{limit,remaining,reset}-{requests,tokens}`,
+  `retry-after` or other quota-looking headers on real xAI responses (API
+  per-model budgets; not the weekly pool). Also shown on `↙` lines of
+  `--verbose`.
 
 - The first line comes about 10 seconds after the first request that reaches
   xAI, so you can see it works; after that one line per interval (default

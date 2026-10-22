@@ -4,6 +4,12 @@
 
 ### Added
 
+- The proxy usage line and `progrok billing` show the SuperGrok weekly usage
+  pool from `cli-chat-proxy.grok.com/v1/billing?format=credits` (percent used,
+  reset time, per-product share; `usagePool` in `--json`). The usage line and
+  `--verbose` also show xAI rate-limit headers (`x-ratelimit-*`,
+  `retry-after`) seen on real responses. Missing parts are omitted.
+
 - `progrok proxy` prints a one-line subscription usage report on stderr
   (used / limit, percent, remaining, billing period, requests since the last
   line): ~10s after the first proxied request, then every 5 minutes while

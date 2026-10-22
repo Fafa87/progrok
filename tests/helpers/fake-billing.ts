@@ -1,4 +1,4 @@
-import { BILLING_URL, USER_URL } from "../../src/transport/billing.js";
+import { BILLING_URL, CREDITS_URL, USER_URL } from "../../src/transport/billing.js";
 
 /**
  * Fake `cli-chat-proxy.grok.com` billing endpoint: a `fetch` that serves
@@ -12,14 +12,37 @@ export function fakeBillingFetch(init: { limit?: number; used?: number; step?: n
     used: init.used ?? 1_234,
     step: init.step ?? 0,
     fail: false as boolean | "network",
-    calls: [] as Array<{ url: string; authorization: string | null }>,
+    /** Fail only the monthly view (`/v1/billing`). */
+    failMonthly: false,
+    /** `?format=credits` config; `null` → 404 like an account without the pool. */
+    pool: {
+      currentPeriod: {
+        type: "USAGE_PERIOD_TYPE_WEEKLY",
+        start: "2026-10-20T00:00:00+00:00",
+        end: "2026-10-27T01:00:00+00:00",
+      },
+      creditUsagePercent: 63,
+      productUsage: [{ product: "GrokBuild", usagePercent: 60 }, { product: "GrokChat", usagePercent: 3 }, { product: "Imagine" }],
+      isUnifiedBillingUser: true,
+      prepaidBalance: { val: 0 },
+      onDemandCap: { val: 0 },
+      onDemandUsed: { val: 0 },
+      topUpMethod: "TOP_UP_METHOD_SAVED_PAYMENT_METHOD",
+      billingPeriodStart: "2026-10-20T00:00:00+00:00",
+      billingPeriodEnd: "2026-10-27T01:00:00+00:00",
+    } as Record<string, unknown> | null,
+    calls: [] as Array<{ url: string; authorization: string | null; client: string | null }>,
   };
   const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input instanceof Request ? input.url : input);
     const headers = new Headers(init?.headers);
-    state.calls.push({ url, authorization: headers.get("authorization") });
+    state.calls.push({ url, authorization: headers.get("authorization"), client: headers.get("x-xai-token-auth") });
     if (state.fail === "network") throw new TypeError("fetch failed");
     if (state.fail) return new Response("unavailable", { status: 503 });
+    if (url === CREDITS_URL) {
+      return state.pool ? Response.json({ config: state.pool }) : new Response("not found", { status: 404 });
+    }
+    if (url === BILLING_URL && state.failMonthly) return new Response("unavailable", { status: 503 });
     if (url === BILLING_URL) {
       const body = {
         config: {

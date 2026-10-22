@@ -93,6 +93,8 @@ export function proxyCommand(): Command {
 
   Usage report (on by default, stderr): subscription usage ~10s after the first
   request, then every 5m but only if requests reached xAI since the last line.
+  Shows the monthly allowance, the SuperGrok weekly pool (% used, reset) and
+  any xAI rate-limit headers seen.
     $ progrok proxy --usage-every 30m   # or 30s, 1h, 1h30m; PROGROK_USAGE_EVERY
     $ progrok proxy --no-usage          # or PROGROK_USAGE_EVERY=off`,
     )

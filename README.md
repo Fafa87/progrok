@@ -246,7 +246,7 @@ OpenAI-compatible provider at `http://127.0.0.1:18645/v1`.
 | `progrok proxy --ollama [port]` | Also impersonate an Ollama server (default `:11434`). |
 | `progrok proxy --verbose` (`-v`) | Log every request on stderr: what the client sent, the call to `api.x.ai`, xAI's status/latency/usage/finish reason, and what the client got. Same as `PROGROK_LOG=1`. |
 | `progrok proxy --log-bodies` | Same plus redacted request/response bodies (`PROGROK_LOG=bodies`, cap with `PROGROK_LOG_MAX_BODY`). |
-| `progrok proxy --usage-every 30m` / `--no-usage` | Subscription usage line on stderr (on by default): ~10s after the first request, then every 5m while requests reach xAI; silent when idle. `PROGROK_USAGE_EVERY=30m` / `off`. |
+| `progrok proxy --usage-every 30m` / `--no-usage` | Subscription usage line on stderr (on by default): ~10s after the first request, then every 5m while requests reach xAI; silent when idle. Includes the SuperGrok weekly pool (`| weekly: 63% used, resets Tue 2026-10-27 02:00`) and any xAI rate-limit headers seen. `PROGROK_USAGE_EVERY=30m` / `off`. |
 | `progrok proxy --lmstudio --reasoning-format think-tags` | Inline reasoning as `<think>…</think>` for clients that ignore `reasoning_content`. |
 | `progrok chat` | Open the local workspace on `127.0.0.1:18646`: chat, live voice, and media. |
 | `progrok models --detail` | List model aliases, pricing, context windows, and media models. |
@@ -260,8 +260,8 @@ OpenAI-compatible provider at `http://127.0.0.1:18645/v1`.
 | `progrok video <prompt> --image ./input.png` | Image-to-video (animate still image). |
 | `progrok video edit <prompt> --video <url>` | Edit existing video with text (real V2V). `grok-imagine-video` only. |
 | `progrok video extend <prompt> --video <url>` | Continue video from last frame. `grok-imagine-video` only. |
-| `progrok billing` | Show subscription plan, usage, and remaining quota. |
-| `progrok billing --json` | Machine-readable billing and usage data. |
+| `progrok billing` | Show subscription plan, monthly usage, and the SuperGrok weekly usage pool (% used, reset time, per-product share). |
+| `progrok billing --json` | Machine-readable billing and usage data (weekly pool under `usagePool`). |
 | `progrok tts <text>` | Synthesize speech to a file or raw stdout. |
 | `progrok stt <file>` | Transcribe a local audio file; supports language hints, diarization, multichannel audio, and repeatable key terms. |
 | `progrok live` | Bridge direct Realtime events over NDJSON stdin/stdout; it does not capture the microphone. |

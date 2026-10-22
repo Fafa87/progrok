@@ -1,4 +1,14 @@
-import { dollars, type BillingSummary } from "../transport/billing.js";
+import {
+  BillingError,
+  describeUsagePool,
+  dollars,
+  fetchBilling,
+  fetchUsagePool,
+  type BillingFetchOptions,
+  type BillingSummary,
+  type UsagePool,
+} from "../transport/billing.js";
+import { describeRateLimit, type RateLimitSnapshot } from "./rate-limit.js";
 import { timestamp } from "./traffic-log.js";
 
 /**
@@ -63,16 +73,57 @@ export function formatInterval(ms: number): string {
   return `${ms}ms`;
 }
 
-export function formatUsageLine(summary: BillingSummary, requests: number, at = new Date()): string {
-  const percent = summary.limit > 0 ? ((summary.used / summary.limit) * 100).toFixed(1) : "0.0";
-  return `${timestamp(at).slice(0, 19)} usage: ${dollars(summary.used)} / ${dollars(summary.limit)} used (${percent}%), `
-    + `${dollars(summary.remaining)} left, period ${summary.periodStart}..${summary.periodEnd}, `
-    + `${requests} xAI request${requests === 1 ? "" : "s"} since last report`;
+/** What one report shows; each part is optional. */
+export interface UsageSnapshot {
+  /** Monthly allowance (`/v1/billing`). */
+  billing?: BillingSummary;
+  /** SuperGrok usage pool, weekly (`/v1/billing?format=credits`). */
+  pool?: UsagePool;
+}
+
+/**
+ * Fetch both billing views in parallel. Either may be missing; throws only
+ * when neither could be read.
+ */
+export async function fetchUsageSnapshot(opts: BillingFetchOptions): Promise<UsageSnapshot> {
+  const [billing, pool] = await Promise.allSettled([fetchBilling(opts), fetchUsagePool(opts)]);
+  const snapshot: UsageSnapshot = {
+    ...(billing.status === "fulfilled" ? { billing: billing.value } : {}),
+    ...(pool.status === "fulfilled" ? { pool: pool.value } : {}),
+  };
+  if (!snapshot.billing && !snapshot.pool) {
+    const reason = billing.status === "rejected" && billing.reason instanceof Error ? billing.reason.message : "no billing data";
+    throw new BillingError(reason);
+  }
+  return snapshot;
+}
+
+export function formatUsageLine(
+  usage: UsageSnapshot | BillingSummary,
+  requests: number,
+  at = new Date(),
+  rateLimit?: RateLimitSnapshot,
+): string {
+  const snapshot: UsageSnapshot = "limit" in usage ? { billing: usage } : usage;
+  const parts: string[] = [];
+  const summary = snapshot.billing;
+  if (summary) {
+    const percent = summary.limit > 0 ? ((summary.used / summary.limit) * 100).toFixed(1) : "0.0";
+    parts.push(`${dollars(summary.used)} / ${dollars(summary.limit)} used (${percent}%), `
+      + `${dollars(summary.remaining)} left, period ${summary.periodStart}..${summary.periodEnd}`);
+  }
+  parts.push(`${requests} xAI request${requests === 1 ? "" : "s"} since last report`);
+  let line = `${timestamp(at).slice(0, 19)} usage: ${parts.join(", ")}`;
+  if (snapshot.pool) line += ` | ${describeUsagePool(snapshot.pool)}`;
+  if (rateLimit) line += ` | ${describeRateLimit(rateLimit)}`;
+  return line;
 }
 
 export interface UsageReporterOptions {
   intervalMs: number;
-  fetchUsage(): Promise<BillingSummary>;
+  fetchUsage(): Promise<UsageSnapshot | BillingSummary>;
+  /** Latest rate-limit headers seen while proxying, if any. */
+  rateLimit?: () => RateLimitSnapshot | undefined;
   write?: (line: string) => void;
   firstReportDelayMs?: number;
   now?: () => number;
@@ -80,7 +131,8 @@ export interface UsageReporterOptions {
 
 export class UsageReporter {
   readonly intervalMs: number;
-  private readonly fetchUsage: () => Promise<BillingSummary>;
+  private readonly fetchUsage: () => Promise<UsageSnapshot | BillingSummary>;
+  private readonly rateLimit: () => RateLimitSnapshot | undefined;
   private readonly write: (line: string) => void;
   private readonly firstDelayMs: number;
   private readonly now: () => number;
@@ -96,6 +148,7 @@ export class UsageReporter {
   constructor(options: UsageReporterOptions) {
     this.intervalMs = options.intervalMs;
     this.fetchUsage = options.fetchUsage;
+    this.rateLimit = options.rateLimit ?? (() => undefined);
     this.write = options.write ?? ((line) => process.stderr.write(`${line}\n`));
     this.firstDelayMs = options.firstReportDelayMs ?? Math.min(FIRST_REPORT_DELAY_MS, options.intervalMs);
     this.now = options.now ?? Date.now;
@@ -145,7 +198,7 @@ export class UsageReporter {
         this.reportedOnce = true;
         this.failures = 0;
         this.retryAt = 0;
-        this.write(formatUsageLine(summary, counted, new Date(this.now())));
+        this.write(formatUsageLine(summary, counted, new Date(this.now()), this.rateLimit()));
       } catch (error) {
         this.failures += 1;
         const backoff = Math.min(this.intervalMs * 2 ** (this.failures - 1), MAX_BACKOFF_MS);

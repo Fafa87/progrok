@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { NextFunction, Request, Response as ExpressResponse } from "express";
 import { resolveUpstreamUrl } from "../transport/base-url.js";
 import type { XaiFetchInput } from "../transport/fetch.js";
+import { describeRateLimit, parseRateLimitHeaders } from "./rate-limit.js";
 
 /**
  * `progrok proxy --verbose` / `--log-bodies` traffic log.
@@ -478,7 +479,8 @@ export class TrafficLogger {
     const headersAt = Date.now() - startedAt;
     const contentType = response.headers.get("content-type") ?? "";
     const failed = !response.ok;
-    const head = `xAI ${response.status} ${input.method} ${input.pathWithQuery} headers=${headersAt}ms`;
+    const limits = parseRateLimitHeaders(input.pathWithQuery, response.status, response.headers);
+    const head = `xAI ${response.status} ${input.method} ${input.pathWithQuery} headers=${headersAt}ms${limits ? ` ${describeRateLimit(limits)};` : ""}`;
 
     if (/event-stream/i.test(contentType) && response.body) {
       this.emit(ctx, "↙", `${head} stream opened`, failed);

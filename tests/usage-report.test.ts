@@ -1,16 +1,26 @@
 import assert from "node:assert/strict";
 import http from "node:http";
 import { afterEach, describe, it, mock } from "node:test";
+import { billingCommand } from "../src/commands/billing.js";
 import { proxyCommand } from "../src/commands/proxy.js";
+import { describeRateLimit, parseRateLimitHeaders, RateLimitTracker } from "../src/proxy/rate-limit.js";
 import { createProxyApp } from "../src/proxy/server.js";
 import {
   DEFAULT_USAGE_EVERY_MS,
+  fetchUsageSnapshot,
   formatUsageLine,
   parseUsageInterval,
   resolveUsageInterval,
   UsageReporter,
 } from "../src/proxy/usage-report.js";
-import { BillingError, fetchBilling, parseBilling } from "../src/transport/billing.js";
+import {
+  BillingError,
+  fetchBilling,
+  fetchUsagePool,
+  formatReset,
+  parseBilling,
+  parseUsagePool,
+} from "../src/transport/billing.js";
 import { fakeBillingFetch } from "./helpers/fake-billing.js";
 import { fakeGrokChat } from "./helpers/fake-grok-chat.js";
 
@@ -204,5 +214,157 @@ describe("proxy request counting", () => {
     } finally {
       for (const server of servers) server.close();
     }
+  });
+});
+
+describe("SuperGrok weekly usage pool", () => {
+  it("parses the ?format=credits shape (live sample published by claudia)", () => {
+    const pool = parseUsagePool({"config":{"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY",
+      "start":"2026-08-08T01:53:09.930537+00:00","end":"2026-08-15T01:53:09.930537+00:00"},
+      "creditUsagePercent":100.0,"onDemandCap":{"val":0},"onDemandUsed":{"val":0},
+      "productUsage":[{"product":"GrokBuild","usagePercent":100.0},{"product":"GrokChat"}],
+      "isUnifiedBillingUser":true,"prepaidBalance":{"val":0},
+      "billingPeriodStart":"2026-08-08T01:53:09.930537+00:00",
+      "billingPeriodEnd":"2026-08-15T01:53:09.930537+00:00"}})!;
+    assert.equal(pool.periodType, "weekly");
+    assert.equal(pool.usedPercent, 100);
+    assert.equal(pool.resetsAt, "2026-08-15T01:53:09.930537+00:00");
+    assert.deepEqual(pool.productUsage, [{ product: "GrokBuild", usagePercent: 100 }, { product: "GrokChat" }]);
+    assert.equal(pool.isUnifiedBillingUser, true);
+  });
+
+  it("treats a period without a percent as 0% and returns nothing for empty bodies", () => {
+    assert.equal(parseUsagePool({ config: { currentPeriod: { type: "USAGE_PERIOD_TYPE_WEEKLY", end: "2026-10-27T01:00:00Z" } } })!.usedPercent, 0);
+    assert.equal(parseUsagePool({ config: {} }), undefined);
+    assert.equal(parseUsagePool("nope"), undefined);
+    assert.equal(parseUsagePool({ config: { creditUsagePercent: 12.5 } })!.periodType, "unknown");
+  });
+
+  it("sends the Grok CLI client marker and the OAuth bearer", async () => {
+    const { fetchImpl, state } = fakeBillingFetch();
+    const pool = await fetchUsagePool({ bearer: "tok", fetchImpl });
+    assert.equal(pool.usedPercent, 63);
+    assert.equal(state.calls[0]!.url, "https://cli-chat-proxy.grok.com/v1/billing?format=credits");
+    assert.equal(state.calls[0]!.authorization, "Bearer tok");
+    assert.equal(state.calls[0]!.client, "xai-grok-cli");
+  });
+
+  it("puts the weekly pool and rate-limit headers on the usage line, omitting what is missing", async () => {
+    const { fetchImpl, state } = fakeBillingFetch();
+    const at = new Date(2026, 9, 22, 16, 45, 0);
+    const reset = formatReset("2026-10-27T01:00:00+00:00");
+    const both = await fetchUsageSnapshot({ bearer: "t", fetchImpl });
+    assert.equal(formatUsageLine(both, 2, at),
+      `2026-10-22 16:45:00 usage: $12.34 / $50.00 used (24.7%), $37.66 left, period 2026-10-01..2026-10-31, 2 xAI requests since last report | weekly: 63% used, resets ${reset}`);
+
+    state.failMonthly = true;
+    const poolOnly = await fetchUsageSnapshot({ bearer: "t", fetchImpl });
+    assert.equal(formatUsageLine(poolOnly, 1, at), `2026-10-22 16:45:00 usage: 1 xAI request since last report | weekly: 63% used, resets ${reset}`);
+
+    state.failMonthly = false;
+    state.pool = null;
+    const monthlyOnly = await fetchUsageSnapshot({ bearer: "t", fetchImpl });
+    assert.ok(!formatUsageLine(monthlyOnly, 1, at).includes("weekly"));
+
+    const limits = parseRateLimitHeaders("/v1/chat/completions", 200, new Headers({
+      "x-ratelimit-limit-requests": "7200",
+      "x-ratelimit-remaining-requests": "7199",
+      "x-ratelimit-limit-tokens": "50000000",
+      "x-ratelimit-remaining-tokens": "49900000",
+    }))!;
+    assert.match(formatUsageLine(monthlyOnly, 1, at, limits), /\| rate-limit: requests 7199\/7200 left, tokens 49\.9M\/50M left$/);
+
+    state.fail = true;
+    await assert.rejects(fetchUsageSnapshot({ bearer: "t", fetchImpl }), BillingError);
+  });
+});
+
+describe("rate-limit headers", () => {
+  it("parses x-ratelimit-*, retry-after and other quota-looking headers; ignores responses without them", () => {
+    assert.equal(parseRateLimitHeaders("/v1/x", 200, new Headers({ "content-type": "application/json" })), undefined);
+    const limited = parseRateLimitHeaders("/v1/chat/completions", 429, new Headers({
+      "retry-after": "30",
+      "x-ratelimit-remaining-requests": "0",
+      "x-ratelimit-reset-requests": "12s",
+      "x-xai-usage-percent": "99",
+    }))!;
+    assert.equal(describeRateLimit(limited), "rate-limit: requests 0 left (reset 12s), retry-after 30s, x-xai-usage-percent=99");
+  });
+
+  it("are captured from real upstream responses while proxying and reach the reporter", async () => {
+    const tracker = new RateLimitTracker();
+    const upstream = fakeGrokChat();
+    const app = createProxyApp({
+      ...upstream,
+      fetchUpstream: async (input, deps) => {
+        const response = await upstream.fetchUpstream(input, deps);
+        const headers = new Headers(response.headers);
+        headers.set("x-ratelimit-limit-requests", "1800");
+        headers.set("x-ratelimit-remaining-requests", "1799");
+        return new Response(response.body, { status: response.status, headers });
+      },
+    }, {
+      compat: "lmstudio",
+      trafficLog: { level: "off" },
+      onUpstreamResponse: (path, response) => tracker.observe(path, response),
+    });
+    const server = await new Promise<http.Server>((resolve) => {
+      const candidate = app.listen(0, "127.0.0.1", () => resolve(candidate));
+    });
+    try {
+      const { port } = server.address() as { port: number };
+      await (await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "grok-build-0.1", messages: [{ role: "user", content: "hi" }] }),
+      })).text();
+      assert.deepEqual(tracker.latest()!.requests, { limit: 1800, remaining: 1799 });
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe("progrok billing", () => {
+  async function run(args: string[], init?: (state: ReturnType<typeof fakeBillingFetch>["state"]) => void) {
+    const billing = fakeBillingFetch();
+    init?.(billing.state);
+    const out: string[] = [];
+    const log = mock.method(console, "log", (...values: unknown[]) => { out.push(values.join(" ")); });
+    try {
+      await billingCommand({ getBearer: async () => "tok", fetchImpl: billing.fetchImpl })
+        .parseAsync(["node", "billing", ...args]);
+    } finally {
+      log.mock.restore();
+    }
+    return out;
+  }
+
+  it("keeps the monthly lines and adds the weekly pool", async () => {
+    const out = await run([]);
+    assert.deepEqual(out.slice(0, 6), [
+      "Plan:      SuperGrok (5000 val)",
+      "Account:   filip@example.com",
+      "Period:    2026-10-01 → 2026-10-31",
+      "Limit:     $50.00",
+      "Used:      $12.34 (25%)",
+      "Remaining: $37.66",
+    ]);
+    assert.equal(out[6], `Weekly:    63% used, resets ${formatReset("2026-10-27T01:00:00+00:00")}`);
+    assert.equal(out[7], "           GrokBuild 60%, GrokChat 3%");
+  });
+
+  it("adds usagePool to --json and omits it when the endpoint has nothing", async () => {
+    const json = JSON.parse((await run(["--json"])).join("\n")) as Record<string, unknown>;
+    assert.equal(json.used, 1234);
+    const pool = json.usagePool as Record<string, unknown>;
+    assert.equal(pool.periodType, "weekly");
+    assert.equal(pool.usedPercent, 63);
+    assert.equal(pool.remainingPercent, 37);
+    assert.equal(pool.resetsAt, "2026-10-27T01:00:00+00:00");
+
+    const without = JSON.parse((await run(["--json"], (state) => { state.pool = null; })).join("\n")) as Record<string, unknown>;
+    assert.equal("usagePool" in without, false);
+    assert.equal(without.used, 1234);
   });
 });

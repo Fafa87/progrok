@@ -5,7 +5,7 @@ import {
   PROXY_DEFAULT_HOST,
 } from "../auth/constants.js";
 import { getValidBearerSnapshot } from "../auth/token-manager.js";
-import { fetchBilling } from "../transport/billing.js";
+import { fetchUsageSnapshot } from "./usage-report.js";
 import { executeXaiFetch } from "../transport/fetch.js";
 import { log } from "../utils/logger.js";
 import { PayloadTooLargeError, readBoundedBody } from "./body.js";
@@ -29,6 +29,7 @@ import {
   type ReasoningFormat,
 } from "./local-request.js";
 import { createOllamaRouter } from "./ollama.js";
+import { RateLimitTracker } from "./rate-limit.js";
 import { safeErrorMessage } from "./redact.js";
 import {
   FIRST_REPORT_DELAY_MS,
@@ -100,25 +101,36 @@ export interface ProxyAppOptions {
    * proxy's usage report counts these.
    */
   onUpstreamRequest?: (pathWithQuery: string) => void;
+  /** Called with every xAI response (e.g. to read rate-limit headers). */
+  onUpstreamResponse?: (pathWithQuery: string, response: globalThis.Response) => void;
 }
 
 /** Catalog lookups do not use the subscription; the usage report skips them. */
 const NON_BILLABLE_PATH = /^\/v1\/(models|language-models|image-generation-models|video-generation-models)(\/|\?|$)/;
 
-function countingFetch(
+function observingFetch(
   fetchUpstream: ProxyAppDependencies["fetchUpstream"],
-  onUpstreamRequest: ((pathWithQuery: string) => void) | undefined,
+  options: Pick<ProxyAppOptions, "onUpstreamRequest" | "onUpstreamResponse">,
 ): ProxyAppDependencies["fetchUpstream"] {
-  if (!onUpstreamRequest) return fetchUpstream;
-  return (input, deps) => {
-    if (!NON_BILLABLE_PATH.test(input.pathWithQuery)) {
+  const { onUpstreamRequest, onUpstreamResponse } = options;
+  if (!onUpstreamRequest && !onUpstreamResponse) return fetchUpstream;
+  return async (input, deps) => {
+    if (onUpstreamRequest && !NON_BILLABLE_PATH.test(input.pathWithQuery)) {
       try {
         onUpstreamRequest(input.pathWithQuery);
       } catch {
         // reporting must never break proxying
       }
     }
-    return fetchUpstream(input, deps);
+    const response = await fetchUpstream(input, deps);
+    if (onUpstreamResponse) {
+      try {
+        onUpstreamResponse(input.pathWithQuery, response);
+      } catch {
+        // reporting must never break proxying
+      }
+    }
+    return response;
   };
 }
 
@@ -160,9 +172,9 @@ export function createProxyApp(
     : new TrafficLogger(options.trafficLog ?? { level: trafficLogLevelFromEnv(process.env["PROGROK_LOG"]) });
   const resolvedDeps: ProxyAppDependencies = {
     getBearer: deps?.getBearer ?? DEFAULT_DEPS.getBearer,
-    fetchUpstream: traffic.wrapFetch(countingFetch(
+    fetchUpstream: traffic.wrapFetch(observingFetch(
       deps?.fetchUpstream ?? DEFAULT_DEPS.fetchUpstream,
-      options.onUpstreamRequest,
+      options,
     )),
   };
   const app = express();
@@ -362,10 +374,12 @@ export async function startProxy(
   extraListeners: ProxyListener[] = [],
   options: { openai?: boolean; trafficLog?: TrafficLogLevel; usageEveryMs?: number } = {},
 ): Promise<void> {
+  const rateLimits = new RateLimitTracker();
   const usage = new UsageReporter({
     intervalMs: options.usageEveryMs
       ?? resolveUsageInterval({}, process.env),
-    fetchUsage: async () => fetchBilling({ bearer: (await getValidBearerSnapshot()).bearer }),
+    fetchUsage: async () => fetchUsageSnapshot({ bearer: (await getValidBearerSnapshot()).bearer }),
+    rateLimit: () => rateLimits.latest(),
   });
   const traffic = new TrafficLogger({
     level: options.trafficLog ?? trafficLogLevelFromEnv(process.env["PROGROK_LOG"]),
@@ -383,7 +397,12 @@ export async function startProxy(
         ...(listener.compat ? { compat: listener.compat } : {}),
         ...(listener.reasoningFormat ? { reasoningFormat: listener.reasoningFormat } : {}),
         trafficLog: traffic,
-        ...(usage.enabled ? { onUpstreamRequest: () => usage.noteRequest() } : {}),
+        ...(usage.enabled
+          ? {
+            onUpstreamRequest: () => usage.noteRequest(),
+            onUpstreamResponse: (path: string, response: globalThis.Response) => rateLimits.observe(path, response),
+          }
+          : {}),
       });
       servers.push(await listen(app, listener.port, host));
     }
