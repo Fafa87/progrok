@@ -4,6 +4,14 @@
 
 ### Added
 
+- `progrok proxy --upstream-stream` (`PROGROK_UPSTREAM_STREAM=1`) is opt-in.
+  Emulated `/v1/chat/completions` requests with `stream: false` (LM Studio and
+  Ollama listeners) are sent to xAI as streams with usage, and the
+  `chat.completion` JSON is assembled locally: text, reasoning, parallel tool
+  calls, finish reason and usage. xAI's response headers arrive at once, and
+  a stalled generation is caught by the idle timeout instead of a long header
+  wait. Requests with `stream: true` and error responses are unchanged.
+
 - The proxy usage line and `progrok billing` show the SuperGrok weekly usage
   pool from `cli-chat-proxy.grok.com/v1/billing?format=credits` (percent used,
   reset time, per-product share; `usagePool` in `--json`). The usage line and
@@ -66,6 +74,23 @@
 
 ### Fixed
 
+- Long non-streaming requests through `progrok proxy` no longer fail after
+  30 seconds with `Upstream headers timed out` / HTTP 502. xAI sends the
+  headers of a `stream: false` response only once the whole answer is ready,
+  and an agent turn with a 170k-token context and reasoning can take minutes.
+  The wait was a hard-coded 30s in `src/transport/fetch.ts`. Upstream xAI calls
+  now wait up to 10m for headers on non-streaming requests and 5m on streaming
+  ones, plus 5m of silence between body chunks. `--upstream-timeout
+  <duration>` / `PROGROK_UPSTREAM_TIMEOUT` and `--upstream-idle-timeout` /
+  `PROGROK_UPSTREAM_IDLE_TIMEOUT` change them (`0` = no limit). These calls go
+  through undici with its own 300s header/body timers off, so Node's built-in
+  fetch limits no longer cap a longer setting. A timeout now returns
+  **504** `upstream_timeout` on every listener and route (OpenAI, LM Studio,
+  Ollama, Anthropic, native LM Studio chat). The error message names the flag
+  and env var, and `--verbose` logs it.
+- A client disconnect aborts the in-flight xAI request on every proxy route,
+  so abandoned agent retries do not keep running against your quota. This
+  behaviour is now covered by tests.
 - A live voice call no longer ends when the server sends an event this build
   cannot model. The parser drops it, logs a sanitised type and keeps reading.
   Only a server `error` event fails the session.

@@ -88,6 +88,10 @@ The proxy also prints a subscription usage line on stderr ~10s after the first
 request and then every 5m while there is traffic (`--usage-every 30m`,
 `--no-usage`, `PROGROK_USAGE_EVERY=off`). It includes the SuperGrok weekly
 pool (`| weekly: 63% used, resets …`), also shown by `progrok billing`.
+Non-streaming requests may wait up to 10m for xAI by default; set
+`--upstream-timeout 20m` or `0` for no limit (`PROGROK_UPSTREAM_TIMEOUT`).
+A timeout returns HTTP 504. With `--upstream-stream`, emulated
+`stream: false` chat completions are streamed from xAI and assembled locally.
 
 ### Pattern 2: Responses API with tools
 

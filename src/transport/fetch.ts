@@ -15,6 +15,14 @@ import {
   type ReplayClass,
   type RetryPolicy,
 } from "./retry.js";
+import {
+  bodyRequestsStream,
+  getUpstreamTimeouts,
+  upstreamFetch,
+  UpstreamTimeoutError,
+  withIdleTimeout,
+  type UpstreamTimeouts,
+} from "./timeouts.js";
 
 const DEFAULT_HEADER_TIMEOUT_MS = 30_000;
 const MAX_NETWORK_BACKOFF_MS = 1_000;
@@ -42,7 +50,12 @@ interface ExecuteOptions {
   authKind: UpstreamAuthKind;
   fetchImpl: typeof fetch;
   resolveUrl(path: string): string | URL;
+  /** Header wait for this request; 0 = none. */
   timeoutMs: number;
+  /** Phase reported when the header wait expires. */
+  timeoutPhase?: "headers" | "stream-headers";
+  /** Max silence between body chunks; 0/undefined = none. */
+  idleMs?: number;
 }
 
 function combineSignals(
@@ -76,11 +89,15 @@ function combineSignals(
 function headerSignal(
   caller: AbortSignal | undefined,
   timeoutMs: number,
-): { signal: AbortSignal; clear(): void } {
+  phase: "headers" | "stream-headers" | undefined,
+): { signal: AbortSignal | undefined; clear(): void } {
+  if (timeoutMs <= 0) return { signal: caller, clear: () => undefined };
   const headerTimeout = new AbortController();
   const timer = setTimeout(() => {
     headerTimeout.abort(
-      new DOMException("Upstream headers timed out", "TimeoutError"),
+      phase
+        ? new UpstreamTimeoutError(phase, timeoutMs)
+        : new DOMException("Upstream headers timed out", "TimeoutError"),
     );
   }, timeoutMs);
   return {
@@ -98,13 +115,13 @@ function replayClass(input: XaiFetchInput, headers: Headers): ReplayClass {
 function requestInit(
   input: XaiFetchInput,
   headers: Headers,
-  signal: AbortSignal,
+  signal: AbortSignal | undefined,
 ): RequestInit {
   const init: RequestInit & { duplex?: "half" } = {
     method: input.method,
     headers,
     body: input.body,
-    signal,
+    ...(signal ? { signal } : {}),
     redirect: "error",
   };
   if (input.body instanceof ReadableStream) init.duplex = "half";
@@ -116,12 +133,13 @@ async function fetchAttempt(
   headers: Headers,
   options: ExecuteOptions,
 ): Promise<Response> {
-  const bounded = headerSignal(input.signal, options.timeoutMs);
+  const bounded = headerSignal(input.signal, options.timeoutMs, options.timeoutPhase);
   try {
-    return await options.fetchImpl(
+    const response = await options.fetchImpl(
       options.resolveUrl(input.pathWithQuery),
       requestInit(input, headers, bounded.signal),
     );
+    return options.idleMs ? withIdleTimeout(response, options.idleMs) : response;
   } finally {
     bounded.clear();
   }
@@ -185,16 +203,29 @@ async function executeWithOptions(
   throw lastError ?? new Error("xAI fetch exhausted retries");
 }
 
+/**
+ * One xAI request with progrok's retry policy. Header/idle limits come from
+ * `deps.timeouts`, else the process-wide `configureUpstreamTimeouts()` values
+ * (defaults: 10 min non-streaming, 5 min streaming, 5 min idle).
+ */
 export function executeXaiFetch(
   input: XaiFetchInput,
-  deps: { bearer: string; fetchImpl?: typeof fetch },
+  deps: {
+    bearer: string;
+    fetchImpl?: typeof fetch;
+    timeouts?: Partial<UpstreamTimeouts>;
+  },
 ): Promise<Response> {
+  const timeouts = { ...getUpstreamTimeouts(), ...deps.timeouts };
+  const streaming = bodyRequestsStream(input.body);
   return executeWithOptions(input, {
     bearer: deps.bearer,
     authKind: "oauth",
-    fetchImpl: deps.fetchImpl ?? globalThis.fetch,
+    fetchImpl: deps.fetchImpl ?? upstreamFetch,
     resolveUrl: (path) => resolveUpstreamUrl(path, "oauth"),
-    timeoutMs: DEFAULT_HEADER_TIMEOUT_MS,
+    timeoutMs: streaming ? timeouts.streamMs : timeouts.nonStreamMs,
+    timeoutPhase: streaming ? "stream-headers" : "headers",
+    idleMs: timeouts.idleMs,
   });
 }
 

@@ -3,13 +3,13 @@ import express, { type Request, type Response } from "express";
 import { PayloadTooLargeError, readBoundedBody } from "./body.js";
 import {
   collectLocalChat,
-  LocalUpstreamError,
   openLocalChatStream,
   parseToolArguments,
   promptText,
   promptToMessages,
   type ChatStreamItem,
   type CollectedChat,
+  upstreamErrorStatus,
 } from "./local-chat.js";
 import {
   LocalModelCatalog,
@@ -446,7 +446,7 @@ async function serveOllamaCompletion(
   try {
     items = await openLocalChatStream(deps, request, controller.signal);
   } catch (error) {
-    const status = error instanceof LocalUpstreamError ? error.status : 502;
+    const status = upstreamErrorStatus(error);
     sendError(res, status, safeErrorMessage(error));
     return;
   }
@@ -459,7 +459,7 @@ async function serveOllamaCompletion(
     const collected = await collectLocalChat(items);
     res.json(collectedBody(kind, model, collected, startedAt, showThinking));
   } catch (error) {
-    const status = error instanceof LocalUpstreamError ? error.status : 502;
+    const status = upstreamErrorStatus(error);
     sendError(res, status, safeErrorMessage(error));
   }
 }

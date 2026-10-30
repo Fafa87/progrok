@@ -8,6 +8,7 @@ import {
 import { REASONING_FORMATS, type ReasoningFormat } from "../proxy/local-request.js";
 import { resolveTrafficLogLevel } from "../proxy/traffic-log.js";
 import { resolveUsageInterval } from "../proxy/usage-report.js";
+import { resolveUpstreamTimeouts } from "../transport/timeouts.js";
 import { loadTokens } from "../auth/token-store.js";
 import {
   PROXY_DEFAULT_PORT,
@@ -27,6 +28,9 @@ interface ProxyOptions {
   logBodies?: boolean;
   usage?: boolean;
   usageEvery?: string;
+  upstreamTimeout?: string;
+  upstreamIdleTimeout?: string;
+  upstreamStream?: boolean;
 }
 
 /** `--lmstudio` alone means the default port; `--lmstudio 4321` picks one. */
@@ -96,7 +100,17 @@ export function proxyCommand(): Command {
   Shows the monthly allowance, the SuperGrok weekly pool (% used, reset) and
   any xAI rate-limit headers seen.
     $ progrok proxy --usage-every 30m   # or 30s, 1h, 1h30m; PROGROK_USAGE_EVERY
-    $ progrok proxy --no-usage          # or PROGROK_USAGE_EVERY=off`,
+    $ progrok proxy --no-usage          # or PROGROK_USAGE_EVERY=off
+
+  Upstream timeouts: a non-streaming request gets xAI's response headers only
+  once the whole answer is ready, which on a big agent context with reasoning
+  can take minutes. progrok waits up to 10m for those (5m for the first byte
+  of a stream, 5m of silence between stream chunks); a timeout answers 504.
+    $ progrok proxy --upstream-timeout 20m     # PROGROK_UPSTREAM_TIMEOUT
+    $ progrok proxy --upstream-timeout 0       # no limit
+    $ progrok proxy --upstream-idle-timeout 10m  # PROGROK_UPSTREAM_IDLE_TIMEOUT
+  --upstream-stream (PROGROK_UPSTREAM_STREAM=1): emulated stream=false chat
+  completions are streamed from xAI and assembled into one JSON here.`,
     )
     .option("-p, --port <port>", "Port number", String(PROXY_DEFAULT_PORT))
     .option("--host <host>", "Host to bind", PROXY_DEFAULT_HOST)
@@ -117,6 +131,9 @@ export function proxyCommand(): Command {
     .option("--log-bodies", "With the traffic log, also dump redacted request/response bodies (or PROGROK_LOG=bodies)")
     .option("--usage-every <duration>", "Subscription usage report interval while there is traffic: 10s..24h, e.g. 5m, 1h (default 5m, or PROGROK_USAGE_EVERY)")
     .option("--no-usage", "Do not print the periodic subscription usage report")
+    .option("--upstream-timeout <duration>", "Max wait for xAI's response headers: 1s..24h or 0 = no limit (default 10m non-streaming / 5m streaming, or PROGROK_UPSTREAM_TIMEOUT)")
+    .option("--upstream-idle-timeout <duration>", "Max silence between chunks of an xAI response: 1s..24h or 0 = no limit (default 5m, or PROGROK_UPSTREAM_IDLE_TIMEOUT)")
+    .option("--upstream-stream", "Emulated /v1/chat/completions with stream=false: stream from xAI and assemble the JSON locally (or PROGROK_UPSTREAM_STREAM=1)")
     .action(async (opts: ProxyOptions) => {
       const tokens = loadTokens();
       if (!tokens?.accessToken) {
@@ -130,6 +147,8 @@ export function proxyCommand(): Command {
           openai: listeners.openai,
           trafficLog: resolveTrafficLogLevel(opts),
           usageEveryMs: resolveUsageInterval(opts),
+          upstreamTimeouts: resolveUpstreamTimeouts(opts),
+          ...(opts.upstreamStream ? { upstreamStream: true } : {}),
         });
         await new Promise(() => {});
       } catch (err) {

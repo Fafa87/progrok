@@ -4,11 +4,11 @@ import express, { type Request, type Response } from "express";
 import { PayloadTooLargeError, readBoundedBody } from "./body.js";
 import {
   collectLocalChat,
-  LocalUpstreamError,
   openLocalChatStream,
   parseToolArguments,
   type ChatStreamItem,
   type CollectedChat,
+  upstreamErrorStatus,
 } from "./local-chat.js";
 import type { LocalCatalogDeps } from "./local-models.js";
 import { normalizeLocalModelId } from "./local-models.js";
@@ -373,7 +373,7 @@ async function serveMessages(req: Request, res: Response, deps: LocalCatalogDeps
   try {
     items = await openLocalChatStream(deps, request, controller.signal);
   } catch (error) {
-    sendError(res, error instanceof LocalUpstreamError ? error.status : 502, safeErrorMessage(error));
+    sendError(res, upstreamErrorStatus(error), safeErrorMessage(error));
     return;
   }
   const id = `msg_progrok_${randomUUID().replace(/-/g, "")}`;
@@ -384,7 +384,7 @@ async function serveMessages(req: Request, res: Response, deps: LocalCatalogDeps
   try {
     res.json(messageBody(id, model, await collectLocalChat(items)));
   } catch (error) {
-    sendError(res, error instanceof LocalUpstreamError ? error.status : 502, safeErrorMessage(error));
+    sendError(res, upstreamErrorStatus(error), safeErrorMessage(error));
   }
 }
 

@@ -4,11 +4,11 @@ import express, { type Request, type Response } from "express";
 import { PayloadTooLargeError, readBoundedBody } from "./body.js";
 import {
   collectLocalChat,
-  LocalUpstreamError,
   openLocalChatStream,
   promptText,
   promptToMessages,
   type ChatStreamItem,
+  upstreamErrorStatus,
 } from "./local-chat.js";
 import {
   LocalModelCatalog,
@@ -197,7 +197,7 @@ async function serveTextCompletion(
   try {
     items = await openLocalChatStream(deps, request, controller.signal);
   } catch (error) {
-    const status = error instanceof LocalUpstreamError ? error.status : 502;
+    const status = upstreamErrorStatus(error);
     sendError(res, status, safeErrorMessage(error));
     return;
   }
@@ -221,7 +221,7 @@ async function serveTextCompletion(
         ...(usage ? { usage } : {}),
       });
     } catch (error) {
-      const status = error instanceof LocalUpstreamError ? error.status : 502;
+      const status = upstreamErrorStatus(error);
       sendError(res, status, safeErrorMessage(error));
     }
     return;

@@ -123,6 +123,41 @@ Parts, each omitted when its source has nothing:
   failure streak, then retries back off (interval × 2ⁿ, at most hourly) and the
   next successful line counts every request since the last report.
 
+## Upstream timeouts
+
+A non-streaming request (`stream: false`) gets xAI's response headers only
+when the whole answer is ready. On an agent turn with a large context and
+reasoning, that can take minutes. A streaming request gets headers almost at
+once and then a steady flow of chunks.
+
+| Limit | Default | Flag | Env |
+|---|---|---|---|
+| Response headers, non-streaming | `10m` | `--upstream-timeout` | `PROGROK_UPSTREAM_TIMEOUT` |
+| Response headers (first byte), streaming | `5m` | `--upstream-timeout` | `PROGROK_UPSTREAM_TIMEOUT` |
+| Silence between body chunks | `5m` | `--upstream-idle-timeout` | `PROGROK_UPSTREAM_IDLE_TIMEOUT` |
+
+- Values use the `--usage-every` syntax (`90s`, `10m`, `1h30m`, a bare number
+  of seconds) within 1s..24h. `0` / `off` means no limit. A flag wins over
+  its env var. `--upstream-timeout` sets both header limits.
+- When a header limit fires, the client gets **504**:
+  `{"error":{"type":"upstream_timeout","code":"upstream_timeout","message":"Upstream headers timed out: xAI did not answer the non-streaming request within 10m. Raise or disable the limit with --upstream-timeout <duration> or PROGROK_UPSTREAM_TIMEOUT (0 = no limit)."}}`.
+  `--verbose` logs the same message on the `↙ ERROR` line. The OpenAI,
+  LM Studio, Ollama, Anthropic and native LM Studio chat routes all behave
+  this way. An idle timeout after a stream has started ends that stream.
+- Requests to xAI use undici with its built-in 300s header and body timers
+  turned off, and progrok enforces the limits above. Node's default fetch
+  limits therefore do not cap a longer setting.
+- If the client disconnects (an agent gives up or retries), progrok aborts the
+  matching xAI request right away.
+- `--upstream-stream` (`PROGROK_UPSTREAM_STREAM=1`) is opt-in and applies only
+  to the LM Studio and Ollama listeners. An emulated `/v1/chat/completions`
+  request with `stream: false` is sent to xAI with `stream: true` and
+  `stream_options.include_usage`. progrok then assembles the `chat.completion`
+  body: content, `reasoning_content` (shaped by `--reasoning-format`), tool
+  calls merged by index, `finish_reason`, `usage` and other top-level fields.
+  Headers arrive immediately, so only the idle limit applies to slow turns.
+  Requests with `stream: true` and xAI error responses pass through unchanged.
+
 ## Local-server emulation (LM Studio / Ollama)
 
 `progrok proxy --lmstudio [port]` and `progrok proxy --ollama [port]` add

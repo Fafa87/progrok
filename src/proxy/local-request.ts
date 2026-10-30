@@ -338,11 +338,20 @@ export interface LocalProxyRoute {
   };
   /** Reshape a successful non-streaming JSON body before it reaches the client. */
   transformJsonResponse?: (body: unknown) => unknown;
+  /**
+   * `--upstream-stream`: send `stream: false` requests to xAI as streams and
+   * assemble the `chat.completion` body locally.
+   */
+  upstreamStream?: boolean;
 }
 
-export function compatChatRoute(format: ReasoningFormat): LocalProxyRoute {
+export function compatChatRoute(
+  format: ReasoningFormat,
+  options: { upstreamStream?: boolean } = {},
+): LocalProxyRoute {
   return {
     relPath: "/chat/completions",
+    ...(options.upstreamStream ? { upstreamStream: true } : {}),
     rewrite: (json) => prepareLocalChatRequest(json),
     chatRender: reasoningRenderOptions(format),
     transformJsonResponse: (body) => shapeChatCompletionReasoning(body, format),

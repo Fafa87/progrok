@@ -10,6 +10,7 @@ import {
 } from "../transport/billing.js";
 import { describeRateLimit, type RateLimitSnapshot } from "./rate-limit.js";
 import { timestamp } from "./traffic-log.js";
+import { formatDuration, parseDuration } from "../utils/duration.js";
 
 /**
  * Periodic subscription-usage line while `progrok proxy` runs.
@@ -28,30 +29,17 @@ export const MAX_USAGE_EVERY_MS = 24 * 60 * 60_000;
 export const FIRST_REPORT_DELAY_MS = 10_000;
 const MAX_BACKOFF_MS = 60 * 60_000;
 
-const UNITS: Record<string, number> = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000 };
-
 /**
  * Parse `30s`, `5m`, `1h`, `1h30m`, `90` (seconds) or `0`/`off` (disabled → 0).
  * Throws on anything else or on intervals outside 10s..24h.
  */
 export function parseUsageInterval(value: string): number {
-  const text = value.trim().toLowerCase();
-  if (["0", "off", "false", "no", "none", "disabled"].includes(text)) return 0;
-  let ms: number;
-  if (/^\d+(\.\d+)?$/.test(text)) {
-    ms = Number(text) * 1_000;
-  } else {
-    const parts = [...text.matchAll(/(\d+(?:\.\d+)?)(ms|s|m|h)/g)];
-    if (parts.length === 0 || parts.map((part) => part[0]).join("") !== text) {
-      throw new Error(`invalid usage interval "${value}" (use e.g. 30s, 5m, 1h, or off)`);
-    }
-    ms = parts.reduce((sum, part) => sum + Number(part[1]) * UNITS[part[2]!]!, 0);
-  }
-  if (ms === 0) return 0;
-  if (ms < MIN_USAGE_EVERY_MS || ms > MAX_USAGE_EVERY_MS) {
-    throw new Error(`usage interval "${value}" must be between 10s and 24h (or off)`);
-  }
-  return Math.round(ms);
+  return parseDuration(value, {
+    label: "usage interval",
+    minMs: MIN_USAGE_EVERY_MS,
+    maxMs: MAX_USAGE_EVERY_MS,
+    rangeText: "10s and 24h",
+  });
 }
 
 /** CLI flags + `PROGROK_USAGE_EVERY` → interval in ms (0 = disabled). */
@@ -67,10 +55,7 @@ export function resolveUsageInterval(
 }
 
 export function formatInterval(ms: number): string {
-  if (ms % 3_600_000 === 0) return `${ms / 3_600_000}h`;
-  if (ms % 60_000 === 0) return `${ms / 60_000}m`;
-  if (ms % 1_000 === 0) return `${ms / 1_000}s`;
-  return `${ms}ms`;
+  return formatDuration(ms);
 }
 
 /** What one report shows; each part is optional. */

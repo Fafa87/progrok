@@ -4,6 +4,7 @@ import { prepareGrokRequestObject } from "./composer-inject.js";
 import type { LocalCatalogDeps } from "./local-models.js";
 import { prepareLocalChatRequest } from "./local-request.js";
 import { redactSecrets } from "./redact.js";
+import { isUpstreamTimeout } from "../transport/timeouts.js";
 
 /**
  * Shared upstream leg for the local-server emulators. Every translated request
@@ -30,6 +31,16 @@ export class LocalUpstreamError extends Error {
     super(message);
     this.name = "LocalUpstreamError";
   }
+}
+
+/**
+ * HTTP status for a failed upstream call: the xAI status when we have one,
+ * 504 when progrok's own upstream timeout fired, else 502.
+ */
+export function upstreamErrorStatus(error: unknown): number {
+  if (error instanceof LocalUpstreamError) return error.status;
+  if (isUpstreamTimeout(error)) return 504;
+  return 502;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

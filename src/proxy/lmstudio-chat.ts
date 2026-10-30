@@ -4,10 +4,10 @@ import express, { type Request, type Response } from "express";
 import { PayloadTooLargeError, readBoundedBody } from "./body.js";
 import {
   collectLocalChat,
-  LocalUpstreamError,
   openLocalChatStream,
   type ChatStreamItem,
   type CollectedChat,
+  upstreamErrorStatus,
 } from "./local-chat.js";
 import { normalizeLocalModelId, type LocalCatalogDeps } from "./local-models.js";
 import { safeErrorMessage } from "./redact.js";
@@ -184,7 +184,7 @@ export function createLmStudioNativeChatRouter(
       try {
         items = await openLocalChatStream(deps, request, controller.signal);
       } catch (error) {
-        const status = error instanceof LocalUpstreamError ? error.status : 502;
+        const status = upstreamErrorStatus(error);
         sendError(res, status, status === 404 ? "model_not_found" : "unknown", safeErrorMessage(error));
         return;
       }
@@ -212,7 +212,7 @@ export function createLmStudioNativeChatRouter(
         try {
           res.json(finish(await collectLocalChat(items)));
         } catch (error) {
-          sendError(res, 502, "unknown", safeErrorMessage(error));
+          sendError(res, upstreamErrorStatus(error), "unknown", safeErrorMessage(error));
         }
         return;
       }

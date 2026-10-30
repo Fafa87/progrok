@@ -7,6 +7,14 @@ import {
 import { getValidBearerSnapshot } from "../auth/token-manager.js";
 import { fetchUsageSnapshot } from "./usage-report.js";
 import { executeXaiFetch } from "../transport/fetch.js";
+import {
+  configureUpstreamTimeouts,
+  describeUpstreamTimeouts,
+  isUpstreamTimeout,
+  resolveUpstreamTimeouts,
+  type UpstreamTimeouts,
+} from "../transport/timeouts.js";
+import { asUpstreamStream, assembleChatCompletion } from "./chat-assemble.js";
 import { log } from "../utils/logger.js";
 import { PayloadTooLargeError, readBoundedBody } from "./body.js";
 import {
@@ -103,6 +111,16 @@ export interface ProxyAppOptions {
   onUpstreamRequest?: (pathWithQuery: string) => void;
   /** Called with every xAI response (e.g. to read rate-limit headers). */
   onUpstreamResponse?: (pathWithQuery: string, response: globalThis.Response) => void;
+  /**
+   * `--upstream-stream`: emulated `/v1/chat/completions` requests with
+   * `stream: false` are streamed from xAI and assembled locally. Defaults to
+   * `PROGROK_UPSTREAM_STREAM`.
+   */
+  upstreamStream?: boolean;
+}
+
+export function upstreamStreamFromEnv(env: NodeJS.ProcessEnv = process.env): boolean {
+  return /^(1|true|yes|on)$/i.test(env["PROGROK_UPSTREAM_STREAM"]?.trim() ?? "");
 }
 
 /** Catalog lookups do not use the subscription; the usage report skips them. */
@@ -149,6 +167,16 @@ const DEFAULT_DEPS: ProxyAppDependencies = {
 function sendUpstreamError(res: Response, error: unknown): void {
   if (res.destroyed) return;
   if (!res.headersSent) {
+    if (isUpstreamTimeout(error)) {
+      res.status(504).json({
+        error: {
+          message: safeErrorMessage(error),
+          type: "upstream_timeout",
+          code: "upstream_timeout",
+        },
+      });
+      return;
+    }
     res.status(502).json({
       error: {
         message: `Upstream error: ${safeErrorMessage(error)}`,
@@ -188,7 +216,9 @@ export function createProxyApp(
     const catalog = new LocalModelCatalog(resolvedDeps);
     const format = options.reasoningFormat
       ?? parseReasoningFormat(process.env["PROGROK_REASONING_FORMAT"], "both");
-    const chatRoute = compatChatRoute(format);
+    const chatRoute = compatChatRoute(format, {
+      upstreamStream: options.upstreamStream ?? upstreamStreamFromEnv(),
+    });
     const forward: ForwardToProxy = (req, res, route) => {
       void handleProxy(req, res, resolvedDeps, route).catch((error: unknown) => {
         sendUpstreamError(res, error);
@@ -262,9 +292,14 @@ async function handleProxy(
     body,
   });
   let forwardBody = body;
+  let assembleStream = false;
   const headers = new Headers(filterRequestHeaders(req.headers));
   if (decision.kind !== "opaque-relay") {
-    const json = route?.rewrite ? route.rewrite(decision.json) : decision.json;
+    let json = route?.rewrite ? route.rewrite(decision.json) : decision.json;
+    if (route?.upstreamStream && decision.kind === "json-relay" && json.stream !== true) {
+      json = asUpstreamStream(json);
+      assembleStream = true;
+    }
     decision.json = json;
     const prepared = prepareGrokRequestObject(relPath, json);
     forwardBody = Buffer.from(JSON.stringify(prepared.value), "utf8");
@@ -295,6 +330,20 @@ async function handleProxy(
     }, { bearer });
 
     if (
+      assembleStream &&
+      upstream.ok &&
+      upstream.body &&
+      (upstream.headers.get("content-type") ?? "").includes("text/event-stream")
+    ) {
+      const assembled = await assembleChatCompletion(upstream.body);
+      res.status(200).json(
+        route?.transformJsonResponse ? route.transformJsonResponse(assembled) : assembled,
+      );
+      return;
+    }
+
+    if (
+      !assembleStream &&
       !route?.relayStreams &&
       (decision.kind === "native-chat" || decision.kind === "native-responses")
     ) {
@@ -372,8 +421,18 @@ export async function startProxy(
   port = PROXY_DEFAULT_PORT,
   host = PROXY_DEFAULT_HOST,
   extraListeners: ProxyListener[] = [],
-  options: { openai?: boolean; trafficLog?: TrafficLogLevel; usageEveryMs?: number } = {},
+  options: {
+    openai?: boolean;
+    trafficLog?: TrafficLogLevel;
+    usageEveryMs?: number;
+    upstreamTimeouts?: UpstreamTimeouts;
+    upstreamStream?: boolean;
+  } = {},
 ): Promise<void> {
+  const timeouts = configureUpstreamTimeouts(
+    options.upstreamTimeouts ?? resolveUpstreamTimeouts({}, process.env),
+  );
+  const upstreamStream = options.upstreamStream ?? upstreamStreamFromEnv();
   const rateLimits = new RateLimitTracker();
   const usage = new UsageReporter({
     intervalMs: options.usageEveryMs
@@ -397,6 +456,7 @@ export async function startProxy(
         ...(listener.compat ? { compat: listener.compat } : {}),
         ...(listener.reasoningFormat ? { reasoningFormat: listener.reasoningFormat } : {}),
         trafficLog: traffic,
+        upstreamStream,
         ...(usage.enabled
           ? {
             onUpstreamRequest: () => usage.noteRequest(),
@@ -435,6 +495,10 @@ export async function startProxy(
     log.dim(`  Usage report: every ${formatInterval(usage.intervalMs)} while there is traffic (stderr; first one ~${formatInterval(Math.min(FIRST_REPORT_DELAY_MS, usage.intervalMs))} after the first request; --no-usage to disable)`);
   } else {
     log.dim("  Usage report: off");
+  }
+  log.dim(`  xAI timeouts: ${describeUpstreamTimeouts(timeouts)} (--upstream-timeout, --upstream-idle-timeout)`);
+  if (upstreamStream && listeners.some((listener) => listener.compat)) {
+    log.dim("  Upstream:     stream=false chat completions are streamed from xAI and assembled locally (--upstream-stream)");
   }
   usage.start();
   log.info("\nPress Ctrl+C to stop.\n");

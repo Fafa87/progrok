@@ -247,6 +247,8 @@ OpenAI-compatible provider at `http://127.0.0.1:18645/v1`.
 | `progrok proxy --verbose` (`-v`) | Log every request on stderr: what the client sent, the call to `api.x.ai`, xAI's status/latency/usage/finish reason, and what the client got. Same as `PROGROK_LOG=1`. |
 | `progrok proxy --log-bodies` | Same plus redacted request/response bodies (`PROGROK_LOG=bodies`, cap with `PROGROK_LOG_MAX_BODY`). |
 | `progrok proxy --usage-every 30m` / `--no-usage` | Subscription usage line on stderr (on by default): ~10s after the first request, then every 5m while requests reach xAI; silent when idle. Includes the SuperGrok weekly pool (`| weekly: 63% used, resets Tue 2026-10-27 02:00`) and any xAI rate-limit headers seen. `PROGROK_USAGE_EVERY=30m` / `off`. |
+| `progrok proxy --upstream-timeout 20m` | How long to wait for xAI. The default is 10m for the response headers of a non-streaming request; the whole answer must be ready before they arrive. Streaming requests default to 5m for the first byte, and the idle default is 5m between chunks (`--upstream-idle-timeout`). `0` = no limit. `PROGROK_UPSTREAM_TIMEOUT`, `PROGROK_UPSTREAM_IDLE_TIMEOUT`. A timeout returns HTTP 504. |
+| `progrok proxy --lmstudio --upstream-stream` | Emulated `stream: false` chat completions are streamed from xAI and assembled into one JSON locally. Text, reasoning, tool calls and usage are kept. `PROGROK_UPSTREAM_STREAM=1`. |
 | `progrok proxy --lmstudio --reasoning-format think-tags` | Inline reasoning as `<think>…</think>` for clients that ignore `reasoning_content`. |
 | `progrok chat` | Open the local workspace on `127.0.0.1:18646`: chat, live voice, and media. |
 | `progrok models --detail` | List model aliases, pricing, context windows, and media models. |
