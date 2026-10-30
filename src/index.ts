@@ -1,3 +1,4 @@
+import "./node-check.js";
 import { Command } from "commander";
 import {
   createRegisteredCommands,

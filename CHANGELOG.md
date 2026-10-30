@@ -83,11 +83,18 @@
   ones, plus 5m of silence between body chunks. `--upstream-timeout
   <duration>` / `PROGROK_UPSTREAM_TIMEOUT` and `--upstream-idle-timeout` /
   `PROGROK_UPSTREAM_IDLE_TIMEOUT` change them (`0` = no limit). These calls go
-  through undici with its own 300s header/body timers off, so Node's built-in
-  fetch limits no longer cap a longer setting. A timeout now returns
+  through undici 6.x with its own 300s header/body timers off, so Node's
+  built-in fetch limits no longer cap a longer setting. A timeout now returns
   **504** `upstream_timeout` on every listener and route (OpenAI, LM Studio,
   Ollama, Anthropic, native LM Studio chat). The error message names the flag
   and env var, and `--verbose` logs it.
+- `progrok` no longer crashes at startup on Node 18 with `ReferenceError:
+  File is not defined`. undici 7 needs Node 20, so it is replaced by undici
+  6.x, which supports Node 18.17+ and has the same `Agent`
+  `headersTimeout`/`bodyTimeout` controls. The long upstream timeouts
+  therefore work on Node 18 as well. undici is imported lazily, on the first
+  xAI request. If it cannot load, progrok uses the built-in fetch and prints
+  a one-line warning.
 - A client disconnect aborts the in-flight xAI request on every proxy route,
   so abandoned agent retries do not keep running against your quota. This
   behaviour is now covered by tests.
@@ -97,6 +104,12 @@
 
 ### Changed
 
+- **Node 18.17+ is supported again.** `engines` is `>=18.17.0`, after 3.0.0
+  raised it to `>=22`. On a Node below that, every command prints a one-line
+  warning naming the running version and then continues. Install, build,
+  `progrok proxy` and the timeout/compat tests are verified on Node 18.19.1.
+  The full test runner still needs Node 22, because it uses
+  `--experimental-test-module-mocks`.
 - `DEFAULT_MODEL` is `grok-4.6`, and the realtime default is the rolling
   `grok-voice-latest` alias. The constant is now `DEFAULT_REALTIME_MODEL`
   because it no longer pins a dated build, and `live --model` accepts any

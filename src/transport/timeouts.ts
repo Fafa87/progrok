@@ -1,4 +1,4 @@
-import { Agent, fetch as undiciFetch } from "undici";
+import type { Agent } from "undici";
 import { formatDuration, parseDuration } from "../utils/duration.js";
 
 /**
@@ -174,17 +174,86 @@ export function withIdleTimeout(response: Response, idleMs: number): Response {
  * between body chunks — that would silently cap any longer limit configured
  * above. Upstream xAI calls therefore go through undici's own fetch with an
  * Agent whose built-in timers are off; progrok enforces the limits itself.
+ *
+ * undici is loaded lazily and only on a Node it supports (the pinned 6.x line
+ * needs >= 18.17; 7.x would crash at import on Node 18 with "File is not
+ * defined"). If it cannot be loaded, the built-in fetch is used and
+ * `prepareUpstreamFetch()` reports why so the proxy can warn once at startup.
  */
+type UndiciModule = typeof import("undici");
+
+export const UNDICI_MIN_NODE = "18.17.0";
+
+export interface UpstreamFetchStatus {
+  mode: "undici" | "builtin";
+  /** Why the built-in fetch is used (only when mode is "builtin"). */
+  reason?: string;
+}
+
+/** Compare dotted versions numerically: -1, 0 or 1. */
+export function compareVersions(a: string, b: string): number {
+  const pa = a.replace(/^v/, "").split(/[.+-]/).map((part) => Number.parseInt(part, 10) || 0);
+  const pb = b.replace(/^v/, "").split(/[.+-]/).map((part) => Number.parseInt(part, 10) || 0);
+  for (let index = 0; index < 3; index += 1) {
+    const diff = (pa[index] ?? 0) - (pb[index] ?? 0);
+    if (diff !== 0) return diff < 0 ? -1 : 1;
+  }
+  return 0;
+}
+
+export function nodeSupportsUndici(version: string = process.versions.node): boolean {
+  return compareVersions(version, UNDICI_MIN_NODE) >= 0;
+}
+
+let undiciModule: UndiciModule | undefined;
+let undiciLoad: Promise<UpstreamFetchStatus> | undefined;
+let undiciStatus: UpstreamFetchStatus | undefined;
 let agent: Agent | undefined;
 
-function upstreamAgent(): Agent {
-  agent ??= new Agent({ headersTimeout: 0, bodyTimeout: 0, connectTimeout: 30_000 });
-  return agent;
+/** Load undici once (if this Node supports it). Safe to call repeatedly. */
+export function prepareUpstreamFetch(
+  loader: () => Promise<UndiciModule> = () => import("undici"),
+  version: string = process.versions.node,
+): Promise<UpstreamFetchStatus> {
+  undiciLoad ??= (async (): Promise<UpstreamFetchStatus> => {
+    if (!nodeSupportsUndici(version)) {
+      return { mode: "builtin", reason: `Node ${version} is older than ${UNDICI_MIN_NODE}` };
+    }
+    try {
+      undiciModule = await loader();
+      return { mode: "undici" };
+    } catch (error) {
+      return { mode: "builtin", reason: `undici could not be loaded (${(error as Error)?.message ?? error})` };
+    }
+  })().then((status) => {
+    undiciStatus = status;
+    return status;
+  });
+  return undiciLoad;
+}
+
+/** Status after `prepareUpstreamFetch()` settled; undefined before that. */
+export function upstreamFetchStatus(): UpstreamFetchStatus | undefined {
+  return undiciStatus;
+}
+
+/** One-line startup warning when long requests may be capped by Node. */
+export function upstreamFetchWarning(status: UpstreamFetchStatus): string | undefined {
+  if (status.mode === "undici") return undefined;
+  return `xAI requests use Node's built-in fetch (${status.reason}); requests longer than ~300s may be cut by Node's own limits. Node ${UNDICI_MIN_NODE} or newer lifts them.`;
+}
+
+/** Test hook: forget the loaded module and status. */
+export function resetUpstreamFetch(): void {
+  undiciModule = undefined;
+  undiciLoad = undefined;
+  undiciStatus = undefined;
+  agent = undefined;
 }
 
 const builtinFetch = globalThis.fetch;
 
-export const upstreamFetch: typeof fetch = (input, init) => {
+export const upstreamFetch: typeof fetch = async (input, init) => {
   // Someone replaced the global fetch (tests, instrumentation): respect it.
   if (globalThis.fetch !== builtinFetch) return globalThis.fetch(input, init);
   const body = init?.body;
@@ -192,8 +261,12 @@ export const upstreamFetch: typeof fetch = (input, init) => {
     body instanceof Uint8Array || body instanceof ArrayBuffer;
   // Multipart / streamed bodies keep the built-in fetch (their own types).
   if (!plain) return globalThis.fetch(input, init);
-  return undiciFetch(
-    input as Parameters<typeof undiciFetch>[0],
-    { ...(init as Parameters<typeof undiciFetch>[1]), dispatcher: upstreamAgent() },
-  ) as unknown as Promise<Response>;
+  await prepareUpstreamFetch();
+  const undici = undiciModule;
+  if (!undici) return globalThis.fetch(input, init);
+  agent ??= new undici.Agent({ headersTimeout: 0, bodyTimeout: 0, connectTimeout: 30_000 });
+  return undici.fetch(
+    input as Parameters<UndiciModule["fetch"]>[0],
+    { ...(init as Parameters<UndiciModule["fetch"]>[1]), dispatcher: agent },
+  ) as unknown as Response;
 };

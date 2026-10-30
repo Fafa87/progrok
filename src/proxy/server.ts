@@ -9,6 +9,8 @@ import { fetchUsageSnapshot } from "./usage-report.js";
 import { executeXaiFetch } from "../transport/fetch.js";
 import {
   configureUpstreamTimeouts,
+  prepareUpstreamFetch,
+  upstreamFetchWarning,
   describeUpstreamTimeouts,
   isUpstreamTimeout,
   resolveUpstreamTimeouts,
@@ -496,7 +498,10 @@ export async function startProxy(
   } else {
     log.dim("  Usage report: off");
   }
-  log.dim(`  xAI timeouts: ${describeUpstreamTimeouts(timeouts)} (--upstream-timeout, --upstream-idle-timeout)`);
+  const fetchStatus = await prepareUpstreamFetch();
+  log.dim(`  xAI timeouts: ${describeUpstreamTimeouts(timeouts)} (--upstream-timeout, --upstream-idle-timeout; HTTP client: ${fetchStatus.mode === "undici" ? "undici" : "Node built-in fetch"})`);
+  const fetchWarning = upstreamFetchWarning(fetchStatus);
+  if (fetchWarning) log.warn(`  WARNING: ${fetchWarning}`);
   if (upstreamStream && listeners.some((listener) => listener.compat)) {
     log.dim("  Upstream:     stream=false chat completions are streamed from xAI and assembled locally (--upstream-stream)");
   }

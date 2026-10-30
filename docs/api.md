@@ -144,9 +144,16 @@ once and then a steady flow of chunks.
   `--verbose` logs the same message on the `↙ ERROR` line. The OpenAI,
   LM Studio, Ollama, Anthropic and native LM Studio chat routes all behave
   this way. An idle timeout after a stream has started ends that stream.
-- Requests to xAI use undici with its built-in 300s header and body timers
-  turned off, and progrok enforces the limits above. Node's default fetch
-  limits therefore do not cap a longer setting.
+- Requests to xAI use undici 6.x with its built-in 300s header and body
+  timers turned off, and progrok enforces the limits above. Node's default
+  fetch limits therefore do not cap a longer setting, on Node 18.17+ as on
+  Node 22. undici is loaded lazily on the first xAI request. If it cannot
+  load, progrok uses Node's built-in fetch and prints one startup warning
+  that requests over ~300s may be cut. The banner's `HTTP client:` field
+  shows which client is in use.
+- Supported runtime: Node 18.17 or newer (`engines`). On an older Node every
+  command prints a one-line warning naming the running version and keeps
+  going. `PROGROK_NO_NODE_WARNING=1` silences it.
 - If the client disconnects (an agent gives up or retries), progrok aborts the
   matching xAI request right away.
 - `--upstream-stream` (`PROGROK_UPSTREAM_STREAM=1`) is opt-in and applies only
